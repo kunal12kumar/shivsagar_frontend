@@ -202,7 +202,7 @@ function QuestionEditorModal({ examId, editing, onSave, onClose }) {
     const toInsert = `$${symbol}$`
 
     if (activeField === 'text') {
-      const newVal = insertAtCursor(textRef, toInsert, (v) => set('text', v), form.text)
+      insertAtCursor(textRef, toInsert, (v) => set('text', v), form.text)
     } else if (activeField === 'solution') {
       insertAtCursor(solRef, toInsert, (v) => set('solution', v), form.solution)
     } else if (activeField.startsWith('opt_')) {
