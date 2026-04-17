@@ -2,26 +2,55 @@
 @tailwind components;
 @tailwind utilities;
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/* ── Admin question editor shared utilities ────────────────────────────── */
+@layer components {
+  .label-sm {
+    @apply block text-xs font-semibold text-gray-600 uppercase tracking-wide mb-1;
+  }
+  .input-sm {
+    @apply w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-400 focus:border-indigo-500 outline-none transition-colors;
+  }
+  .input-textarea {
+    @apply w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-indigo-400 focus:border-indigo-500 outline-none resize-y transition-colors;
+  }
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+:root {
+  --bg-primary: #F5F4F0;
+  --bg-card: #FFFFFF;
+  --text-primary: #1A2332;
+  --text-muted: #5A6B7B;
+  --border: #DDE2E8;
+  --blue: #3A6FA8;
+  --green: #2D8653;
+  --amber: #B45309;
+  --red: #C0392B;
+}
+
+* {
+  box-sizing: border-box;
 }
 
 body {
-  color: var(--foreground);
-  background: var(--background);
-  font-family: Arial, Helvetica, sans-serif;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
 }
 
-@layer utilities {
-  .text-balance {
-    text-wrap: balance;
-  }
+/* Prevent text selection during exam */
+.exam-mode {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #F5F4F0;
+}
+::-webkit-scrollbar-thumb {
+  background: #CBD5E0;
+  border-radius: 3px;
 }
