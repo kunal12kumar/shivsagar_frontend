@@ -13,15 +13,20 @@
  */
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
+import toast from 'react-hot-toast'
+import { fmtIST, fmtISTTime, fmtRelative } from '@/lib/utils/time'
 import {
   getCandidates, getViolations, controlExam,
   startExam, getResults, computeResults, indexFace,
+  getCandidateViolations, getLiveScores, resetCandidateScore,
+  addCandidate, bulkImportCandidates, deleteCandidate,
 } from '@/lib/api/adminClient'
 import { clsx } from 'clsx'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const EXAM_ID = 1
+const IS_DEV = process.env.NODE_ENV === 'development'
 
 const SEV_LABEL = { 1:'Low', 2:'Low', 3:'Medium', 4:'Medium', 5:'High', 6:'Critical', 7:'Critical', 8:'Critical' }
 const SEV_COLOR = {
@@ -31,6 +36,79 @@ const SEV_COLOR = {
   7:'text-red-700 font-bold', 8:'text-red-700 font-bold',
 }
 
+// Mirrors VIOLATION_WEIGHTS in integrity_service.py  (weight × severity/4 = score increment)
+const VIOLATION_SCORING = [
+  { type: 'face_impersonation',    weight: 10.0, category: 'Face', description: 'Face matches another candidate — impersonation' },
+  { type: 'face_mismatch',         weight: 8.0,  category: 'Face', description: 'Face does not match registered photo' },
+  { type: 'voice_assistant_keyword', weight: 8.0, category: 'Voice', description: 'AI assistant keyword detected in audio' },
+  { type: 'multiple_monitors',     weight: 5.0,  category: 'System', description: 'External monitor detected (production)' },
+  { type: 'multiple_faces',        weight: 5.0,  category: 'Face', description: 'More than one person visible in frame' },
+  { type: 'mic_permission_denied', weight: 5.0,  category: 'Voice', description: 'Microphone permission denied' },
+  { type: 'screenshot_attempt',    weight: 4.0,  category: 'Copy', description: 'PrintScreen key pressed' },
+  { type: 'sustained_speech',      weight: 4.0,  category: 'Voice', description: 'Continuous speech for extended period' },
+  { type: 'extended_tab_switch',   weight: 4.0,  category: 'Focus', description: 'Away from exam for more than 10 seconds' },
+  { type: 'face_detection_failed', weight: 3.0,  category: 'Face', description: 'Face not detectable in webcam frame' },
+  { type: 'fullscreen_exit',       weight: 3.0,  category: 'Focus', description: 'Exited fullscreen mode' },
+  { type: 'devtools_attempt',      weight: 3.0,  category: 'Focus', description: 'F12 / developer tools key pressed' },
+  { type: 'gaze_deviation',        weight: 3.0,  category: 'Gaze', description: 'Eyes not focused on screen' },
+  { type: 'tab_switch',            weight: 2.0,  category: 'Focus', description: 'Switched to another tab/window' },
+  { type: 'tab_hidden',            weight: 2.0,  category: 'Focus', description: 'Browser tab hidden' },
+  { type: 'paste_attempt',         weight: 2.0,  category: 'Copy', description: 'Paste action attempted' },
+  { type: 'copy_attempt',          weight: 1.5,  category: 'Copy', description: 'Copy action attempted' },
+  { type: 'cut_attempt',           weight: 1.5,  category: 'Copy', description: 'Cut action attempted' },
+  { type: 'copy_paste_attempt',    weight: 1.0,  category: 'Copy', description: 'Ctrl+C/V keyboard shortcut' },
+  { type: 'drag_attempt',          weight: 1.0,  category: 'Copy', description: 'Text drag attempted' },
+  { type: 'camera_unavailable',    weight: 1.0,  category: 'System', description: 'Webcam disconnected or unavailable' },
+  { type: 'audio_unavailable',     weight: 1.0,  category: 'System', description: 'Microphone not detected' },
+  { type: 'right_click',           weight: 0.5,  category: 'Copy', description: 'Right-click context menu attempted' },
+]
+
+const CATEGORY_COLOR = {
+  Face: 'bg-purple-100 text-purple-700',
+  Voice: 'bg-blue-100 text-blue-700',
+  Focus: 'bg-amber-100 text-amber-700',
+  Copy: 'bg-orange-100 text-orange-700',
+  Gaze: 'bg-cyan-100 text-cyan-700',
+  System: 'bg-gray-100 text-gray-600',
+}
+
+// ── Confirmation toast (replaces window.confirm) ─────────────────────────────
+// Returns a Promise<boolean>. Shows a toast with Confirm / Cancel buttons.
+// Usage:  if (!await confirmToast('Are you sure?')) return
+function confirmToast(message, { danger = false } = {}) {
+  return new Promise((resolve) => {
+    toast(
+      (t) => (
+        <div className="flex flex-col gap-3 min-w-[260px]">
+          <p className="text-sm text-gray-800 leading-snug">{message}</p>
+          <div className="flex gap-2 justify-end">
+            <button
+              onClick={() => { toast.dismiss(t.id); resolve(false) }}
+              className="px-3 py-1.5 text-xs border border-gray-200 rounded-lg
+                         text-gray-600 hover:bg-gray-100 font-medium transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => { toast.dismiss(t.id); resolve(true) }}
+              className={clsx(
+                'px-3 py-1.5 text-xs rounded-lg font-semibold text-white transition-colors',
+                danger ? 'bg-red-600 hover:bg-red-700' : 'bg-exam-blue hover:bg-blue-700'
+              )}
+            >
+              Confirm
+            </button>
+          </div>
+        </div>
+      ),
+      {
+        duration: Infinity,
+        style: { padding: '14px 16px', maxWidth: '340px', borderRadius: '14px' },
+      }
+    )
+  })
+}
+
 // ── Small components ──────────────────────────────────────────────────────────
 
 function IntegrityBadge({ score }) {
@@ -38,8 +116,8 @@ function IntegrityBadge({ score }) {
   return (
     <span className={clsx(
       'inline-block text-xs font-bold px-2 py-0.5 rounded-full',
-      s >= 70 ? 'bg-red-100 text-red-700' :
-      s >= 40 ? 'bg-amber-100 text-amber-700' :
+      s >= 40 ? 'bg-red-100 text-red-700' :
+      s >= 20 ? 'bg-amber-100 text-amber-700' :
                'bg-green-100 text-green-700'
     )}>
       {s}
@@ -57,22 +135,33 @@ function StatCard({ label, value, color, sub }) {
   )
 }
 
-function CandidateCard({ candidate, style, onClick }) {
+function CandidateCard({ candidate, style, onClick, onAudit }) {
   const s = candidate.integrity_score || 0
   return (
-    <div style={style} onClick={() => onClick(candidate)} className="p-1 cursor-pointer">
+    <div style={style} className="p-1">
       <div className={clsx(
-        'h-full rounded-xl border p-2 text-xs flex flex-col justify-between transition-all hover:shadow-sm hover:border-exam-blue',
-        s >= 70 ? 'border-red-300 bg-red-50' :
-        s >= 40 ? 'border-amber-200 bg-amber-50' :
+        'h-full rounded-xl border p-2 text-xs flex flex-col justify-between transition-all hover:shadow-sm',
+        s >= 40 ? 'border-red-300 bg-red-50' :
+        s >= 20 ? 'border-amber-200 bg-amber-50' :
                  'border-exam-border bg-white'
       )}>
-        <div className="font-semibold text-exam-text truncate">{candidate.name}</div>
-        <div className="text-exam-muted truncate text-[11px]">{candidate.roll_number}</div>
-        <div className="flex items-center justify-between mt-1">
-          <span className={clsx('w-2 h-2 rounded-full', candidate.connected ? 'bg-green-500' : 'bg-gray-300')} />
-          <IntegrityBadge score={s} />
-        </div>
+        <button
+          onClick={() => onClick(candidate)}
+          className="text-left w-full hover:opacity-80 transition-opacity"
+        >
+          <div className="font-semibold text-exam-text truncate">{candidate.name}</div>
+          <div className="text-exam-muted truncate text-[11px]">{candidate.roll_number}</div>
+          <div className="flex items-center justify-between mt-1">
+            <span className={clsx('w-2 h-2 rounded-full', candidate.connected ? 'bg-green-500' : 'bg-gray-300')} />
+            <IntegrityBadge score={s} />
+          </div>
+        </button>
+        <button
+          onClick={(e) => { e.stopPropagation(); onAudit(candidate) }}
+          className="mt-1.5 w-full text-center text-[10px] text-exam-blue hover:underline font-medium"
+        >
+          View Audit →
+        </button>
       </div>
     </div>
   )
@@ -116,12 +205,24 @@ export default function AdminDashboard() {
   const [tab, setTab]               = useState('monitor')   // monitor | results | control | enroll
   const [search, setSearch]         = useState('')
   const [selected, setSelected]     = useState(null)        // candidate detail modal
-  const [toast, setToast]           = useState(null)        // {msg, ok}
+  const [selectedViolations, setSelectedViolations] = useState([])
+  const [selectedViolationsLoading, setSelectedViolationsLoading] = useState(false)
   // Face enrollment state: { [candidateId]: 'idle'|'uploading'|'done'|'error', message? }
   const [enrollStatus, setEnrollStatus] = useState({})
   const [enrollPreview, setEnrollPreview] = useState({})   // { [candidateId]: objectURL }
   const fileInputRefs               = useRef({})           // { [candidateId]: <input> }
   const wsRef                       = useRef(null)
+  const pollRef                     = useRef(null)
+  const resultsPollRef              = useRef(null)
+
+  // ── Students tab state ────────────────────────────────────────────────
+  const [studentsMode, setStudentsMode] = useState('add')   // 'add' | 'bulk'
+  const [addForm, setAddForm]           = useState({ roll_number: '', name: '', email: '' })
+  const [addLoading, setAddLoading]     = useState(false)
+  const [bulkFile, setBulkFile]         = useState(null)    // File object
+  const [bulkLoading, setBulkLoading]   = useState(false)
+  const [bulkResult, setBulkResult]     = useState(null)    // API response
+  const bulkFileRef                     = useRef(null)
 
   const WS_BASE = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:3001'
 
@@ -137,12 +238,6 @@ export default function AdminDashboard() {
     setAuthReady(true)
   }, [router])
 
-  // ── Toast helper
-  const showToast = useCallback((msg, ok = true) => {
-    setToast({ msg, ok })
-    setTimeout(() => setToast(null), 3000)
-  }, [])
-
   // ── Load data
   useEffect(() => {
     if (!authReady) return
@@ -152,35 +247,57 @@ export default function AdminDashboard() {
         setCandidates(cRes.data)
         setViolations(vRes.data.slice(0, 100))
       })
-      .catch(() => showToast('Failed to load data', false))
+      .catch(() => toast.error('Failed to load data'))
       .finally(() => setLoading(false))
 
-    // Admin WebSocket
+    // Admin WebSocket (best-effort — falls back to polling if not running)
     const token = localStorage.getItem('rgipt-admin-token')
     if (token) {
-      const ws = new WebSocket(`${WS_BASE}/ws/admin?token=${token}`)
-      wsRef.current = ws
+      try {
+        const ws = new WebSocket(`${WS_BASE}/ws/admin?token=${token}`)
+        wsRef.current = ws
 
-      ws.onmessage = (e) => {
-        try {
-          const msg = JSON.parse(e.data)
-          if (msg.type === 'CANDIDATE_UPDATE') {
-            setCandidates(prev => prev.map(c => c.id === msg.candidate_id ? { ...c, ...msg.data } : c))
-          }
-          if (msg.type === 'VIOLATION') {
-            setViolations(prev => [msg, ...prev].slice(0, 200))
-          }
-          if (msg.type === 'INTEGRITY_UPDATE') {
-            setCandidates(prev => prev.map(c =>
-              c.id === msg.candidate_id ? { ...c, integrity_score: msg.score } : c
-            ))
-          }
-        } catch (_) {}
-      }
+        ws.onmessage = (e) => {
+          try {
+            const msg = JSON.parse(e.data)
+            if (msg.type === 'CANDIDATE_UPDATE') {
+              setCandidates(prev => prev.map(c => c.id === msg.candidate_id ? { ...c, ...msg.data } : c))
+            }
+            if (msg.type === 'VIOLATION') {
+              setViolations(prev => [msg, ...prev].slice(0, 200))
+            }
+            if (msg.type === 'INTEGRITY_UPDATE') {
+              setCandidates(prev => prev.map(c =>
+                c.id === msg.candidate_id ? { ...c, integrity_score: msg.score } : c
+              ))
+            }
+          } catch (_) {}
+        }
+      } catch (_) {}
     }
 
-    return () => wsRef.current?.close()
-  }, [authReady, WS_BASE, showToast])
+    // ── Auto-poll integrity scores every 30s (WS fallback) ────────────────
+    const pollScores = () => {
+      getLiveScores(EXAM_ID)
+        .then((res) => {
+          const scores = res.data?.scores || {}
+          setCandidates(prev => prev.map(c => {
+            const s = scores[String(c.id)]
+            return s !== undefined ? { ...c, integrity_score: s } : c
+          }))
+        })
+        .catch(() => {})
+    }
+    // Poll immediately then every 30s
+    pollScores()
+    pollRef.current = setInterval(pollScores, 30000)
+
+    return () => {
+      wsRef.current?.close()
+      if (pollRef.current) clearInterval(pollRef.current)
+      if (resultsPollRef.current) clearInterval(resultsPollRef.current)
+    }
+  }, [authReady, WS_BASE])
 
   // ── Computed ──────────────────────────────────────────────────────────────
   const filtered = candidates.filter(c =>
@@ -191,65 +308,122 @@ export default function AdminDashboard() {
   const stats = {
     total:     candidates.length,
     connected: candidates.filter(c => c.connected).length,
-    watch:     candidates.filter(c => (c.integrity_score || 0) >= 40 && (c.integrity_score || 0) < 70).length,
-    flagged:   candidates.filter(c => (c.integrity_score || 0) >= 70).length,
+    watch:     candidates.filter(c => (c.integrity_score || 0) >= 20 && (c.integrity_score || 0) < 40).length,
+    flagged:   candidates.filter(c => (c.integrity_score || 0) >= 40).length,
   }
 
   // ── Actions ───────────────────────────────────────────────────────────────
   const handleControl = async (action, confirmMsg) => {
-    if (confirmMsg && !window.confirm(confirmMsg)) return
+    if (confirmMsg && !await confirmToast(confirmMsg)) return
     try {
       await controlExam(EXAM_ID, action)
-      showToast(`Action "${action}" applied`)
+      toast.success(`Action "${action}" applied`)
     } catch {
-      showToast('Failed to send command', false)
+      toast.error('Failed to send command')
     }
   }
 
   const handleStartExam = async () => {
-    if (!window.confirm('Start the exam now? This sets status = ACTIVE and broadcasts to all candidates.')) return
+    if (!await confirmToast('Start the exam now? This sets status = ACTIVE and broadcasts to all candidates.')) return
+    const toastId = toast.loading('Starting exam…')
     try {
       await startExam(EXAM_ID)
-      showToast('Exam started!')
+      toast.success('Exam started! All candidates notified.', { id: toastId })
     } catch (err) {
-      showToast(err.response?.data?.detail || 'Failed to start exam', false)
+      toast.error(err.response?.data?.detail || 'Failed to start exam', { id: toastId })
     }
   }
 
-  const handleComputeResults = async () => {
+  // Silent poll — called automatically every 30s while Results tab is open
+  const loadResultsSilent = useCallback(async () => {
     try {
-      setResultsLoading(true)
-      await computeResults(EXAM_ID)
-      showToast('Result computation queued — refresh in ~30s')
-    } catch {
-      showToast('Failed to queue computation', false)
-    } finally {
-      setResultsLoading(false)
-    }
-  }
+      const res = await getResults(EXAM_ID)
+      if (res.data.length > 0) setResults(res.data)
+    } catch { /* silent — don't show errors on auto-poll */ }
+  }, [])
 
+  // Manual refresh button — shows feedback
   const handleLoadResults = async () => {
     setResultsLoading(true)
+    const toastId = toast.loading('Loading results…')
     try {
       const res = await getResults(EXAM_ID)
       setResults(res.data)
-      if (res.data.length === 0) showToast('No results yet — compute first', false)
+      if (res.data.length === 0) toast.error('No results yet — waiting for students to submit', { id: toastId })
+      else toast.success(`${res.data.length} result(s) loaded`, { id: toastId })
     } catch {
-      showToast('Failed to load results', false)
+      toast.error('Failed to load results', { id: toastId })
     } finally {
       setResultsLoading(false)
     }
   }
 
+  // Manual re-compute — admin override for corrections / edge cases
+  const handleComputeResults = async () => {
+    const toastId = toast.loading('Re-computing results…')
+    try {
+      setResultsLoading(true)
+      const computeRes = await computeResults(EXAM_ID)
+      const { candidates = 0 } = computeRes.data || {}
+      if (candidates === 0) {
+        toast.error('No answers found — make sure candidates have submitted', { id: toastId })
+        setResultsLoading(false)
+        return
+      }
+      const res = await getResults(EXAM_ID)
+      setResults(res.data)
+      toast.success(`✓ ${res.data.length} result(s) re-computed`, { id: toastId })
+    } catch (err) {
+      toast.error(err.response?.data?.detail || 'Re-computation failed', { id: toastId })
+    } finally {
+      setResultsLoading(false)
+    }
+  }
+
+  const handleSelectCandidate = (candidate) => {
+    setSelected(candidate)
+    setSelectedViolations([])
+    setSelectedViolationsLoading(true)
+    getCandidateViolations(candidate.id, EXAM_ID)
+      .then(res => setSelectedViolations(res.data))
+      .catch(() => {})
+      .finally(() => setSelectedViolationsLoading(false))
+  }
+
   const handleBlockCandidate = async (candidateId) => {
-    if (!window.confirm('Block this candidate? They will be removed from the exam.')) return
+    if (!await confirmToast('Block this candidate? They will be removed from the exam.', { danger: true })) return
+    const toastId = toast.loading('Blocking candidate…')
     try {
       await controlExam(EXAM_ID, `block_${candidateId}`)
       setCandidates(prev => prev.map(c => c.id === candidateId ? { ...c, is_blocked: true } : c))
       setSelected(null)
-      showToast('Candidate blocked')
+      setSelectedViolations([])
+      toast.success('Candidate blocked', { id: toastId })
     } catch {
-      showToast('Failed to block candidate', false)
+      toast.error('Failed to block candidate', { id: toastId })
+    }
+  }
+
+  const handleResetScore = async (candidate) => {
+    if (!await confirmToast(
+      `[DEV] Reset integrity score + delete ALL violations for ${candidate.name}? This is irreversible — use only for testing.`,
+      { danger: true }
+    )) return
+    const toastId = toast.loading(`Resetting ${candidate.name}…`)
+    try {
+      const res = await resetCandidateScore(candidate.id, EXAM_ID)
+      const { violations_deleted } = res.data
+      // Update UI immediately
+      setCandidates(prev => prev.map(c =>
+        c.id === candidate.id ? { ...c, integrity_score: 0, violation_count: 0 } : c
+      ))
+      if (selected?.id === candidate.id) {
+        setSelected(prev => ({ ...prev, integrity_score: 0, violation_count: 0 }))
+        setSelectedViolations([])
+      }
+      toast.success(`Score reset — ${violations_deleted} violation(s) deleted`, { id: toastId })
+    } catch {
+      toast.error('Reset failed', { id: toastId })
     }
   }
 
@@ -265,6 +439,7 @@ export default function AdminDashboard() {
 
   const handleIndexFace = async (candidateId, file) => {
     setEnrollStatus(prev => ({ ...prev, [candidateId]: { state: 'uploading' } }))
+    const toastId = toast.loading('Indexing face with AWS Rekognition…')
     try {
       const res = await indexFace(candidateId, file)
       setEnrollStatus(prev => ({
@@ -277,11 +452,80 @@ export default function AdminDashboard() {
           ? { ...c, photo_indexed: true, rekognition_face_id: res.data.face_id, photo_s3_key: res.data.s3_key }
           : c
       ))
-      showToast(`Face enrolled for ${res.data.name}`)
+      toast.success(`Face enrolled for ${res.data.name}`, { id: toastId })
     } catch (err) {
       const msg = err.response?.data?.detail || 'Upload failed'
       setEnrollStatus(prev => ({ ...prev, [candidateId]: { state: 'error', message: msg } }))
-      showToast(msg, false)
+      toast.error(msg, { id: toastId })
+    }
+  }
+
+  // ── Students handlers ─────────────────────────────────────────────────
+  const handleAddCandidate = async (e) => {
+    e.preventDefault()
+    const { roll_number, name, email } = addForm
+    if (!roll_number.trim() || !name.trim() || !email.trim()) {
+      toast.error('All fields are required')
+      return
+    }
+    setAddLoading(true)
+    const toastId = toast.loading('Adding candidate…')
+    try {
+      const res = await addCandidate({ roll_number: roll_number.trim(), name: name.trim(), email: email.trim(), exam_id: EXAM_ID })
+      setCandidates(prev => [...prev, {
+        id: res.data.id,
+        name: res.data.name,
+        roll_number: res.data.roll_number,
+        email: res.data.email,
+        connected: false,
+        integrity_score: 0,
+        violation_count: 0,
+        photo_indexed: false,
+      }])
+      setAddForm({ roll_number: '', name: '', email: '' })
+      toast.success(`✓ ${res.data.name} added (ID #${res.data.id})`, { id: toastId })
+    } catch (err) {
+      toast.error(err.response?.data?.detail || 'Failed to add candidate', { id: toastId })
+    } finally {
+      setAddLoading(false)
+    }
+  }
+
+  const handleBulkUpload = async () => {
+    if (!bulkFile) { toast.error('Select a CSV or Excel file first'); return }
+    setBulkLoading(true)
+    setBulkResult(null)
+    const toastId = toast.loading(`Importing ${bulkFile.name}…`)
+    try {
+      const res = await bulkImportCandidates(bulkFile, EXAM_ID)
+      setBulkResult(res.data)
+      // Refresh candidate list so new rows appear immediately
+      const cRes = await getCandidates(EXAM_ID)
+      setCandidates(cRes.data)
+      if (res.data.added > 0) {
+        toast.success(`✓ ${res.data.added} candidate(s) imported`, { id: toastId })
+      } else {
+        toast.error('No new candidates added — check skipped details', { id: toastId })
+      }
+    } catch (err) {
+      toast.error(err.response?.data?.detail || 'Import failed', { id: toastId })
+    } finally {
+      setBulkLoading(false)
+    }
+  }
+
+  const handleDeleteCandidate = async (candidate) => {
+    if (!await confirmToast(
+      `Delete ${candidate.name} (${candidate.roll_number})? This removes all their answers, violations and results. Irreversible.`,
+      { danger: true }
+    )) return
+    const toastId = toast.loading('Deleting…')
+    try {
+      await deleteCandidate(candidate.id)
+      setCandidates(prev => prev.filter(c => c.id !== candidate.id))
+      toast.success(`${candidate.name} deleted`, { id: toastId })
+    } catch (err) {
+      toast.error(err.response?.data?.detail || 'Delete failed', { id: toastId })
     }
   }
 
@@ -306,17 +550,45 @@ export default function AdminDashboard() {
           </div>
           {/* Tabs */}
           <nav className="flex gap-1 ml-4">
-            <TabButton active={tab === 'monitor'} onClick={() => setTab('monitor')}>
+            <TabButton active={tab === 'monitor'} onClick={() => {
+              setTab('monitor')
+              if (resultsPollRef.current) { clearInterval(resultsPollRef.current); resultsPollRef.current = null }
+            }}>
               📊 Live Monitor
             </TabButton>
-            <TabButton active={tab === 'results'} onClick={() => { setTab('results'); handleLoadResults() }}>
+            <TabButton active={tab === 'results'} onClick={() => {
+              setTab('results')
+              handleLoadResults()
+              // Auto-poll every 30s while tab is open — catches new submissions
+              if (resultsPollRef.current) clearInterval(resultsPollRef.current)
+              resultsPollRef.current = setInterval(loadResultsSilent, 30000)
+            }}>
               🏆 Results
             </TabButton>
-            <TabButton active={tab === 'control'} onClick={() => setTab('control')}>
+            <TabButton active={tab === 'control'} onClick={() => {
+              setTab('control')
+              if (resultsPollRef.current) { clearInterval(resultsPollRef.current); resultsPollRef.current = null }
+            }}>
               ⚙ Exam Control
             </TabButton>
-            <TabButton active={tab === 'enroll'} onClick={() => setTab('enroll')}>
+            <TabButton active={tab === 'students'} onClick={() => {
+              setTab('students')
+              setBulkResult(null)
+              if (resultsPollRef.current) { clearInterval(resultsPollRef.current); resultsPollRef.current = null }
+            }}>
+              👥 Students
+            </TabButton>
+            <TabButton active={tab === 'enroll'} onClick={() => {
+              setTab('enroll')
+              if (resultsPollRef.current) { clearInterval(resultsPollRef.current); resultsPollRef.current = null }
+            }}>
               👤 Face Enrollment
+            </TabButton>
+            <TabButton active={tab === 'scoring'} onClick={() => {
+              setTab('scoring')
+              if (resultsPollRef.current) { clearInterval(resultsPollRef.current); resultsPollRef.current = null }
+            }}>
+              📊 Scoring Guide
             </TabButton>
             <TabButton active={false} onClick={() => router.push('/admin/questions')}>
               📚 Questions
@@ -335,16 +607,6 @@ export default function AdminDashboard() {
         </div>
       </header>
 
-      {/* ── Toast ───────────────────────────────────────────────────────── */}
-      {toast && (
-        <div className={clsx(
-          'fixed bottom-6 right-6 z-50 px-4 py-3 rounded-xl shadow-lg text-sm font-medium text-white transition-all',
-          toast.ok ? 'bg-green-600' : 'bg-red-600'
-        )}>
-          {toast.msg}
-        </div>
-      )}
-
       {/* ── Tab: Live Monitor ────────────────────────────────────────────── */}
       {tab === 'monitor' && (
         <div className="flex-1 p-4 flex flex-col gap-4">
@@ -353,8 +615,8 @@ export default function AdminDashboard() {
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <StatCard label="Total"     value={stats.total}     color="text-exam-blue"  />
             <StatCard label="Connected" value={stats.connected} color="text-green-600"  />
-            <StatCard label="Watch"     value={stats.watch}     color="text-amber-600"  sub="Score 40–69" />
-            <StatCard label="Flagged"   value={stats.flagged}   color="text-red-600"    sub="Score ≥ 70" />
+            <StatCard label="Watch"     value={stats.watch}     color="text-amber-600"  sub="Score 20–39" />
+            <StatCard label="Flagged"   value={stats.flagged}   color="text-red-600"    sub="Score ≥ 40 🚨" />
           </div>
 
           {/* Emergency controls bar */}
@@ -380,10 +642,13 @@ export default function AdminDashboard() {
             {/* Candidate grid */}
             <div className="flex-1 bg-white rounded-2xl border border-exam-border p-4 min-h-[480px]">
               <div className="flex items-center justify-between mb-3">
-                <h2 className="font-bold text-exam-text">
+                <h2 className="font-bold text-exam-text flex items-center gap-2">
                   Candidates
-                  <span className="ml-2 text-xs font-normal text-exam-muted">
+                  <span className="text-xs font-normal text-exam-muted">
                     {filtered.length} shown
+                  </span>
+                  <span className="text-[10px] text-exam-muted font-normal bg-gray-100 px-1.5 py-0.5 rounded-full">
+                    scores refresh 30s
                   </span>
                 </h2>
                 <input
@@ -403,7 +668,13 @@ export default function AdminDashboard() {
                 <div className="grid gap-1 overflow-y-auto max-h-[420px]"
                      style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))' }}>
                   {filtered.map((c) => (
-                    <CandidateCard key={c.id} candidate={c} style={{}} onClick={setSelected} />
+                    <CandidateCard
+                      key={c.id}
+                      candidate={c}
+                      style={{}}
+                      onClick={handleSelectCandidate}
+                      onAudit={(cand) => router.push(`/admin/candidates/${cand.id}?exam_id=${EXAM_ID}`)}
+                    />
                   ))}
                 </div>
               )}
@@ -411,13 +682,13 @@ export default function AdminDashboard() {
               {/* Legend */}
               <div className="flex gap-4 mt-3 text-xs text-exam-muted">
                 <span className="flex items-center gap-1">
-                  <span className="w-2.5 h-2.5 rounded bg-green-100 border border-green-200 inline-block" /> Score &lt; 40
+                  <span className="w-2.5 h-2.5 rounded bg-green-100 border border-green-200 inline-block" /> Score &lt; 20
                 </span>
                 <span className="flex items-center gap-1">
-                  <span className="w-2.5 h-2.5 rounded bg-amber-50 border border-amber-200 inline-block" /> 40–69
+                  <span className="w-2.5 h-2.5 rounded bg-amber-50 border border-amber-200 inline-block" /> 20–39
                 </span>
                 <span className="flex items-center gap-1">
-                  <span className="w-2.5 h-2.5 rounded bg-red-50 border border-red-200 inline-block" /> ≥ 70
+                  <span className="w-2.5 h-2.5 rounded bg-red-50 border border-red-200 inline-block" /> ≥ 40 🚨
                 </span>
               </div>
             </div>
@@ -461,9 +732,7 @@ export default function AdminDashboard() {
                         </a>
                       )}
                       <div className="text-gray-400 mt-1">
-                        {v.created_at
-                          ? new Date(v.created_at).toLocaleTimeString()
-                          : v.timestamp ? new Date(v.timestamp).toLocaleTimeString() : ''}
+                        {fmtISTTime(v.created_at || v.timestamp)}
                       </div>
                     </div>
                   ))
@@ -508,14 +777,22 @@ export default function AdminDashboard() {
             {results.length === 0 ? (
               <div className="text-center py-16 text-exam-muted">
                 <div className="text-4xl mb-3">🏆</div>
-                <p>No results yet. Click <strong>Compute Results</strong> after the exam ends.</p>
+                <p className="mb-3">No results yet.</p>
+                <p className="text-sm max-w-md mx-auto">
+                  <strong>Step 1:</strong> Make sure the exam has been submitted by candidates (answers saved via Celery).<br />
+                  <strong>Step 2:</strong> Click <strong>⚡ Compute Results</strong> — this queues a Celery task.<br />
+                  <strong>Step 3:</strong> Wait ~10–30 seconds, then click <strong>🔄 Refresh</strong>.
+                </p>
+                <p className="text-xs text-gray-400 mt-2">
+                  Requires: Celery worker running with <code>-Q mysql_writes,default</code>
+                </p>
               </div>
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-exam-border text-left">
-                      {['Rank','Roll No','Name','Score','Percentile','Correct','Attempted'].map(h => (
+                      {['Rank','Roll No','Name','Score','Percentile','Correct','Incorrect','Attempted','Analysis'].map(h => (
                         <th key={h} className="pb-3 pr-4 text-xs font-semibold text-exam-muted uppercase tracking-wide">
                           {h}
                         </th>
@@ -524,7 +801,10 @@ export default function AdminDashboard() {
                   </thead>
                   <tbody className="divide-y divide-exam-border">
                     {results.map((r) => (
-                      <tr key={r.rank} className="hover:bg-gray-50 transition-colors">
+                      <tr
+                        key={r.rank ?? r.roll_number}
+                        className="hover:bg-gray-50 transition-colors"
+                      >
                         <td className="py-3 pr-4 font-bold text-exam-blue">#{r.rank}</td>
                         <td className="py-3 pr-4 text-exam-muted font-mono text-xs">{r.roll_number}</td>
                         <td className="py-3 pr-4 font-medium text-exam-text">{r.name}</td>
@@ -540,7 +820,21 @@ export default function AdminDashboard() {
                           </span>
                         </td>
                         <td className="py-3 pr-4 text-green-700 font-medium">{r.correct}</td>
+                        <td className="py-3 pr-4 text-red-600 font-medium">{r.incorrect ?? '—'}</td>
                         <td className="py-3 pr-4 text-exam-muted">{r.attempted}</td>
+                        <td className="py-3 pr-4">
+                          {r.candidate_id ? (
+                            <button
+                              onClick={() => router.push(
+                                `/admin/candidates/${r.candidate_id}?exam_id=${EXAM_ID}&tab=answers`
+                              )}
+                              className="px-2.5 py-1 text-xs bg-exam-blue/10 text-exam-blue rounded-lg
+                                         hover:bg-exam-blue/20 font-medium transition-colors whitespace-nowrap"
+                            >
+                              📋 View Answers
+                            </button>
+                          ) : '—'}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -611,7 +905,7 @@ export default function AdminDashboard() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-exam-border text-left">
-                    {['Roll No', 'Name', 'Email', 'Integrity', 'Violations', 'Status', 'Action'].map(h => (
+                    {['Roll No', 'Name', 'Email', 'Integrity', 'Violations', 'Status', 'Action', ...(IS_DEV ? ['Dev'] : [])].map(h => (
                       <th key={h} className="pb-3 pr-4 text-xs font-semibold text-exam-muted uppercase tracking-wide">
                         {h}
                       </th>
@@ -643,11 +937,325 @@ export default function AdminDashboard() {
                           Block
                         </button>
                       </td>
+                      {IS_DEV && (
+                        <td className="py-3 pr-4">
+                          <button
+                            onClick={() => handleResetScore(c)}
+                            className="px-3 py-1 text-xs bg-purple-50 text-purple-700 border border-purple-200
+                                       rounded-lg hover:bg-purple-100 font-medium transition-colors"
+                            title="DEV: reset Redis score + delete MySQL violations"
+                          >
+                            🔄 Reset
+                          </button>
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Tab: Students ───────────────────────────────────────────────── */}
+      {tab === 'students' && (
+        <div className="flex-1 p-4 flex flex-col gap-4">
+
+          {/* ── Mode switcher ─────────────────────────────────────────── */}
+          <div className="bg-white rounded-2xl border border-exam-border p-5">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h2 className="font-bold text-exam-text text-base">Student Management</h2>
+                <p className="text-sm text-exam-muted mt-0.5">
+                  Add candidates one by one or bulk-import from a CSV / Excel file.
+                  After adding, go to <strong>Face Enrollment</strong> to upload their photos.
+                </p>
+              </div>
+              <div className="text-right flex-shrink-0 ml-4">
+                <div className="text-3xl font-extrabold text-exam-blue">{candidates.length}</div>
+                <div className="text-xs text-exam-muted">registered</div>
+              </div>
+            </div>
+
+            {/* Toggle */}
+            <div className="flex gap-2">
+              <button
+                onClick={() => { setStudentsMode('add'); setBulkResult(null) }}
+                className={clsx(
+                  'px-4 py-2 rounded-xl text-sm font-semibold border transition-colors',
+                  studentsMode === 'add'
+                    ? 'bg-exam-blue text-white border-exam-blue'
+                    : 'border-exam-border text-exam-muted hover:bg-gray-50'
+                )}
+              >
+                ➕ Add Single
+              </button>
+              <button
+                onClick={() => { setStudentsMode('bulk'); setBulkResult(null) }}
+                className={clsx(
+                  'px-4 py-2 rounded-xl text-sm font-semibold border transition-colors',
+                  studentsMode === 'bulk'
+                    ? 'bg-exam-blue text-white border-exam-blue'
+                    : 'border-exam-border text-exam-muted hover:bg-gray-50'
+                )}
+              >
+                📂 Bulk Upload (CSV / Excel)
+              </button>
+            </div>
+          </div>
+
+          {/* ── Add Single form ────────────────────────────────────────── */}
+          {studentsMode === 'add' && (
+            <div className="bg-white rounded-2xl border border-exam-border p-6">
+              <h3 className="font-semibold text-exam-text mb-4">Add New Candidate</h3>
+              <form onSubmit={handleAddCandidate} className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-xs font-semibold text-exam-muted mb-1 uppercase tracking-wide">
+                    Roll Number <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. DAT2026001"
+                    value={addForm.roll_number}
+                    onChange={e => setAddForm(f => ({ ...f, roll_number: e.target.value }))}
+                    className="w-full px-3 py-2 border border-exam-border rounded-xl text-sm
+                               focus:outline-none focus:ring-2 focus:ring-exam-blue focus:border-exam-blue"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-exam-muted mb-1 uppercase tracking-wide">
+                    Full Name <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Kunal Kumar"
+                    value={addForm.name}
+                    onChange={e => setAddForm(f => ({ ...f, name: e.target.value }))}
+                    className="w-full px-3 py-2 border border-exam-border rounded-xl text-sm
+                               focus:outline-none focus:ring-2 focus:ring-exam-blue focus:border-exam-blue"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-exam-muted mb-1 uppercase tracking-wide">
+                    Email <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="email"
+                    placeholder="e.g. kunal@example.com"
+                    value={addForm.email}
+                    onChange={e => setAddForm(f => ({ ...f, email: e.target.value }))}
+                    className="w-full px-3 py-2 border border-exam-border rounded-xl text-sm
+                               focus:outline-none focus:ring-2 focus:ring-exam-blue focus:border-exam-blue"
+                    required
+                  />
+                </div>
+                <div className="sm:col-span-3 flex items-center gap-3 pt-1">
+                  <button
+                    type="submit"
+                    disabled={addLoading}
+                    className="px-6 py-2.5 bg-exam-blue text-white rounded-xl text-sm font-semibold
+                               hover:bg-blue-700 disabled:opacity-60 transition-colors"
+                  >
+                    {addLoading ? 'Adding…' : '➕ Add Candidate'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAddForm({ roll_number: '', name: '', email: '' })}
+                    className="px-4 py-2.5 text-sm text-exam-muted border border-exam-border rounded-xl hover:bg-gray-50 transition-colors"
+                  >
+                    Clear
+                  </button>
+                  <span className="text-xs text-exam-muted ml-auto">
+                    Exam ID: <strong>{EXAM_ID}</strong>
+                  </span>
+                </div>
+              </form>
+            </div>
+          )}
+
+          {/* ── Bulk Upload ────────────────────────────────────────────── */}
+          {studentsMode === 'bulk' && (
+            <div className="bg-white rounded-2xl border border-exam-border p-6 space-y-5">
+              <div>
+                <h3 className="font-semibold text-exam-text mb-1">Bulk Import from CSV / Excel</h3>
+                <p className="text-sm text-exam-muted">
+                  Upload a <strong>.csv</strong> or <strong>.xlsx</strong> file.
+                  The file must have these column headers (exact, case-insensitive):
+                </p>
+                <div className="mt-2 flex gap-2 flex-wrap">
+                  {['roll_number', 'name', 'email'].map(col => (
+                    <code key={col} className="bg-blue-50 text-blue-700 border border-blue-200 px-2 py-0.5 rounded text-xs font-mono">
+                      {col}
+                    </code>
+                  ))}
+                </div>
+              </div>
+
+              {/* Template download hint */}
+              <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs text-amber-800">
+                <strong>Template format (first 3 rows):</strong>
+                <pre className="mt-1 font-mono leading-relaxed">{`roll_number,name,email
+DAT2026001,Rahul Sharma,rahul@example.com
+DAT2026002,Priya Singh,priya@example.com`}</pre>
+              </div>
+
+              {/* File picker */}
+              <div>
+                <input
+                  ref={bulkFileRef}
+                  type="file"
+                  accept=".csv,.xlsx,.xls"
+                  className="hidden"
+                  onChange={e => { setBulkFile(e.target.files?.[0] || null); setBulkResult(null) }}
+                />
+                <div className="flex items-center gap-3 flex-wrap">
+                  <button
+                    onClick={() => bulkFileRef.current?.click()}
+                    className="px-4 py-2.5 border-2 border-dashed border-exam-border rounded-xl text-sm
+                               text-exam-muted hover:border-exam-blue hover:text-exam-blue transition-colors font-medium"
+                  >
+                    📁 {bulkFile ? bulkFile.name : 'Choose CSV or Excel file'}
+                  </button>
+                  {bulkFile && (
+                    <>
+                      <span className="text-xs text-exam-muted">
+                        {(bulkFile.size / 1024).toFixed(1)} KB
+                      </span>
+                      <button
+                        onClick={() => { setBulkFile(null); setBulkResult(null); if (bulkFileRef.current) bulkFileRef.current.value = '' }}
+                        className="text-xs text-red-500 hover:underline"
+                      >
+                        ✕ Remove
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              <button
+                onClick={handleBulkUpload}
+                disabled={!bulkFile || bulkLoading}
+                className="px-6 py-2.5 bg-exam-blue text-white rounded-xl text-sm font-semibold
+                           hover:bg-blue-700 disabled:opacity-50 transition-colors"
+              >
+                {bulkLoading ? '⏳ Importing…' : '⬆ Import Now'}
+              </button>
+
+              {/* Result summary */}
+              {bulkResult && (
+                <div className="space-y-3">
+                  {/* Summary row */}
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="bg-green-50 border border-green-200 rounded-xl p-3 text-center">
+                      <div className="text-2xl font-extrabold text-green-600">{bulkResult.added}</div>
+                      <div className="text-xs text-green-700 font-semibold mt-0.5">Added</div>
+                    </div>
+                    <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-center">
+                      <div className="text-2xl font-extrabold text-amber-600">{bulkResult.skipped}</div>
+                      <div className="text-xs text-amber-700 font-semibold mt-0.5">Skipped</div>
+                    </div>
+                    <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-center">
+                      <div className="text-2xl font-extrabold text-red-600">{bulkResult.errors}</div>
+                      <div className="text-xs text-red-700 font-semibold mt-0.5">Errors</div>
+                    </div>
+                  </div>
+
+                  {/* Skipped details */}
+                  {bulkResult.skipped_details?.length > 0 && (
+                    <div className="bg-amber-50 border border-amber-200 rounded-xl p-3">
+                      <p className="text-xs font-semibold text-amber-800 mb-2">Skipped rows:</p>
+                      <div className="space-y-1 max-h-32 overflow-y-auto">
+                        {bulkResult.skipped_details.map((s, i) => (
+                          <div key={i} className="text-xs text-amber-700 font-mono">
+                            Row {s.row} — {s.roll_number} — {s.reason}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Added list */}
+                  {bulkResult.candidates?.length > 0 && (
+                    <div className="bg-green-50 border border-green-200 rounded-xl p-3">
+                      <p className="text-xs font-semibold text-green-800 mb-2">Successfully added:</p>
+                      <div className="space-y-1 max-h-40 overflow-y-auto">
+                        {bulkResult.candidates.map((c) => (
+                          <div key={c.id} className="text-xs text-green-700 font-mono">
+                            #{c.id} — {c.roll_number} — {c.name} — {c.email}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── Student list ───────────────────────────────────────────── */}
+          <div className="bg-white rounded-2xl border border-exam-border overflow-hidden">
+            <div className="px-5 py-4 border-b border-exam-border flex items-center justify-between">
+              <h3 className="font-semibold text-exam-text">
+                All Candidates
+                <span className="ml-2 text-xs font-normal text-exam-muted">({candidates.length} total)</span>
+              </h3>
+              <span className="text-xs text-exam-muted">
+                {candidates.filter(c => c.photo_indexed).length} / {candidates.length} photos enrolled
+              </span>
+            </div>
+
+            {candidates.length === 0 ? (
+              <div className="text-center py-16 text-exam-muted">
+                <div className="text-4xl mb-3">👥</div>
+                <p>No candidates yet — add them above.</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-gray-50 border-b border-exam-border">
+                    <tr>
+                      {['#', 'Roll No', 'Name', 'Email', 'Photo', 'Exam Started', 'Action'].map(h => (
+                        <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-exam-muted uppercase tracking-wide">
+                          {h}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-exam-border">
+                    {candidates.map((c, i) => (
+                      <tr key={c.id} className="hover:bg-gray-50 transition-colors">
+                        <td className="px-4 py-3 text-xs text-exam-muted">{i + 1}</td>
+                        <td className="px-4 py-3 font-mono text-xs text-exam-text font-medium">{c.roll_number}</td>
+                        <td className="px-4 py-3 font-medium text-exam-text">{c.name}</td>
+                        <td className="px-4 py-3 text-xs text-exam-muted">{c.email}</td>
+                        <td className="px-4 py-3">
+                          {c.photo_indexed ? (
+                            <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-green-100 text-green-700">✓ Enrolled</span>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-gray-100 text-gray-500">Pending</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 text-xs text-exam-muted">
+                          {c.exam_started_at ? fmtISTTime(c.exam_started_at) : '—'}
+                        </td>
+                        <td className="px-4 py-3">
+                          <button
+                            onClick={() => handleDeleteCandidate(c)}
+                            className="px-3 py-1 text-xs bg-red-50 text-red-700 border border-red-200
+                                       rounded-lg hover:bg-red-100 font-medium transition-colors"
+                          >
+                            🗑 Delete
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -847,51 +1455,257 @@ export default function AdminDashboard() {
         </div>
       )}
 
+      {/* ── Tab: Scoring Guide ──────────────────────────────────────────── */}
+      {tab === 'scoring' && (
+        <div className="flex-1 p-4 flex flex-col gap-4">
+          <div className="bg-white rounded-2xl border border-exam-border p-5">
+            <h2 className="font-bold text-exam-text mb-1">Violation Scoring Guide</h2>
+            <p className="text-sm text-exam-muted mb-1">
+              Each violation adds <strong>weight × (severity ÷ 4)</strong> to the candidate&apos;s integrity score (0–100).
+              Score ≥ 40 triggers a red alert. All flags are advisory — nothing auto-disqualifies.
+            </p>
+            <div className="flex items-center gap-4 text-xs text-exam-muted mt-2 mb-4 flex-wrap">
+              <span>Example: <strong>face_mismatch</strong> (weight 8.0) at severity 4 → +8.0 pts</span>
+              <span>Example: <strong>right_click</strong> (weight 0.5) at severity 1 → +0.125 pts</span>
+            </div>
+
+            {/* Formula card */}
+            <div className="bg-exam-blue-light border border-blue-200 rounded-xl p-4 mb-5 text-sm">
+              <code className="font-mono text-exam-blue font-bold">
+                score_increment = weight × (severity / 4)
+              </code>
+              <div className="text-xs text-exam-muted mt-1">
+                Severity range: 1 (Low) → 8 (Critical). Score is atomic-incremented in Redis and capped at 100.
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-exam-border text-left">
+                    {['Violation Type', 'Category', 'Weight', 'Sev 2 score', 'Sev 4 score', 'Description'].map(h => (
+                      <th key={h} className="pb-3 pr-4 text-xs font-semibold text-exam-muted uppercase tracking-wide">
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-exam-border">
+                  {VIOLATION_SCORING.map((row) => (
+                    <tr key={row.type} className="hover:bg-gray-50 transition-colors">
+                      <td className="py-2.5 pr-4">
+                        <code className="text-xs bg-gray-100 px-1.5 py-0.5 rounded font-mono text-exam-text">
+                          {row.type}
+                        </code>
+                      </td>
+                      <td className="py-2.5 pr-4">
+                        <span className={clsx('px-2 py-0.5 rounded-full text-xs font-medium', CATEGORY_COLOR[row.category])}>
+                          {row.category}
+                        </span>
+                      </td>
+                      <td className="py-2.5 pr-4 font-bold text-exam-text">{row.weight}</td>
+                      <td className="py-2.5 pr-4 text-exam-muted font-mono text-xs">
+                        +{(row.weight * 0.5).toFixed(2)}
+                      </td>
+                      <td className="py-2.5 pr-4 text-exam-muted font-mono text-xs">
+                        +{(row.weight * 1.0).toFixed(2)}
+                      </td>
+                      <td className="py-2.5 text-exam-muted text-xs">{row.description}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Alert threshold info */}
+          <div className="bg-white rounded-2xl border border-exam-border p-5">
+            <h3 className="font-semibold text-exam-text mb-3">Alert Thresholds</h3>
+            <div className="flex flex-wrap gap-4 text-sm">
+              <div className="flex items-center gap-2">
+                <span className="w-3 h-3 rounded-full bg-green-500 inline-block" />
+                <span className="text-exam-muted">Score 0–19: Clean — no action needed</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="w-3 h-3 rounded-full bg-amber-400 inline-block" />
+                <span className="text-exam-muted">Score 20–39: Watch — review violations</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="w-3 h-3 rounded-full bg-red-500 inline-block" />
+                <span className="text-exam-muted">Score ≥ 40: 🚨 Alert — faculty review required</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Candidate detail modal ───────────────────────────────────────── */}
       {selected && (
         <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4"
-             onClick={() => setSelected(null)}>
-          <div className="bg-white rounded-2xl p-6 max-w-sm w-full shadow-2xl"
+             onClick={() => { setSelected(null); setSelectedViolations([]) }}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col"
                onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-start justify-between mb-5">
+
+            {/* Modal header */}
+            <div className="flex items-start justify-between p-6 pb-4 border-b border-exam-border flex-shrink-0">
               <div>
                 <h3 className="font-bold text-exam-text text-lg">{selected.name}</h3>
                 <p className="text-sm text-exam-muted font-mono">{selected.roll_number}</p>
               </div>
-              <button onClick={() => setSelected(null)}
+              <button onClick={() => { setSelected(null); setSelectedViolations([]) }}
                 className="text-exam-muted hover:text-exam-text w-8 h-8 flex items-center justify-center
-                           rounded-lg hover:bg-gray-100">
+                           rounded-lg hover:bg-gray-100 flex-shrink-0">
                 ✕
               </button>
             </div>
 
-            <div className="space-y-3 text-sm">
-              {[
-                { label: 'Email', value: selected.email },
-                { label: 'Status', value: selected.connected ? '🟢 Connected' : '⚫ Disconnected' },
-                { label: 'Integrity Score', value: <IntegrityBadge score={selected.integrity_score || 0} /> },
-                { label: 'Violations', value: selected.violation_count || 0 },
-                { label: 'Started At', value: selected.exam_started_at
-                    ? new Date(selected.exam_started_at).toLocaleString() : '—' },
-              ].map(({ label, value }) => (
-                <div key={label} className="flex justify-between items-center py-2 border-b border-exam-border last:border-0">
-                  <span className="text-exam-muted">{label}</span>
-                  <span className="font-medium text-exam-text">{value}</span>
+            {/* Modal body — scrollable */}
+            <div className="flex-1 overflow-y-auto p-6 space-y-5">
+
+              {/* Quick stats */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="bg-gray-50 rounded-xl p-3 text-center">
+                  <div className="text-xs text-exam-muted mb-1">Status</div>
+                  <div className={clsx('text-sm font-semibold', selected.connected ? 'text-green-600' : 'text-gray-400')}>
+                    {selected.connected ? '🟢 Online' : '⚫ Offline'}
+                  </div>
                 </div>
-              ))}
+                <div className="bg-gray-50 rounded-xl p-3 text-center">
+                  <div className="text-xs text-exam-muted mb-1">Integrity Score</div>
+                  <div className="flex justify-center">
+                    <IntegrityBadge score={selected.integrity_score || 0} />
+                  </div>
+                </div>
+                <div className="bg-gray-50 rounded-xl p-3 text-center">
+                  <div className="text-xs text-exam-muted mb-1">Violations</div>
+                  <div className="text-sm font-bold text-exam-text">{selected.violation_count || 0}</div>
+                </div>
+                <div className="bg-gray-50 rounded-xl p-3 text-center">
+                  <div className="text-xs text-exam-muted mb-1">Started</div>
+                  <div className="text-xs font-medium text-exam-text">
+                    {fmtISTTime(selected.exam_started_at)}
+                  </div>
+                </div>
+              </div>
+
+              {/* Email */}
+              <div className="flex justify-between items-center text-sm py-1 border-b border-exam-border">
+                <span className="text-exam-muted">Email</span>
+                <span className="font-medium text-exam-text">{selected.email}</span>
+              </div>
+
+              {/* Violations list */}
+              <div>
+                <h4 className="font-semibold text-exam-text text-sm mb-2 flex items-center gap-2">
+                  Violation Log
+                  {selectedViolationsLoading && (
+                    <span className="animate-spin inline-block w-3 h-3 border-2 border-gray-300 border-t-exam-blue rounded-full" />
+                  )}
+                  <span className="text-xs font-normal text-exam-muted">
+                    ({selectedViolations.length} events)
+                  </span>
+                </h4>
+
+                {selectedViolations.length === 0 && !selectedViolationsLoading ? (
+                  <div className="text-sm text-exam-muted text-center py-4 bg-gray-50 rounded-xl">
+                    No violations recorded
+                  </div>
+                ) : (
+                  <div className="space-y-1.5 max-h-52 overflow-y-auto">
+                    {selectedViolations.map((v, i) => (
+                      <div key={i} className={clsx(
+                        'flex items-start justify-between gap-2 p-2.5 rounded-lg border text-xs',
+                        v.severity >= 5 ? 'border-red-200 bg-red-50' :
+                        v.severity >= 3 ? 'border-amber-200 bg-amber-50' :
+                                         'border-gray-100 bg-gray-50'
+                      )}>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className={clsx('font-semibold', SEV_COLOR[v.severity] || 'text-exam-text')}>
+                              {v.type?.replace(/_/g, ' ')}
+                            </span>
+                            <span className={clsx('px-1.5 py-0.5 rounded text-[10px] font-medium',
+                              v.severity >= 5 ? 'bg-red-200 text-red-700' :
+                              v.severity >= 3 ? 'bg-amber-200 text-amber-700' :
+                                               'bg-gray-200 text-gray-600'
+                            )}>
+                              sev {v.severity}
+                            </span>
+                          </div>
+                          <div className="text-gray-400 mt-0.5">
+                            {fmtISTTime(v.created_at)}
+                          </div>
+                        </div>
+                        {v.snapshot_url && (
+                          <a href={v.snapshot_url} target="_blank" rel="noreferrer"
+                            className="flex-shrink-0">
+                            <img src={v.snapshot_url} alt="snapshot"
+                              className="w-14 h-10 object-cover rounded border border-gray-200 hover:opacity-80 transition-opacity" />
+                          </a>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Snapshot thumbnails (violations with snapshot_url) */}
+              {(() => {
+                const snaps = selectedViolations.filter(v => v.snapshot_url)
+                if (snaps.length === 0) return null
+                return (
+                  <div>
+                    <h4 className="font-semibold text-exam-text text-sm mb-2">
+                      Snapshots ({snaps.length})
+                    </h4>
+                    <div className="flex flex-wrap gap-2">
+                      {snaps.map((v, i) => (
+                        <a key={i} href={v.snapshot_url} target="_blank" rel="noreferrer"
+                          title={`${v.type} · ${fmtISTTime(v.created_at)}`}>
+                          <img src={v.snapshot_url} alt={v.type}
+                            className="w-20 h-14 object-cover rounded-lg border border-gray-200 hover:border-exam-blue hover:shadow transition-all" />
+                        </a>
+                      ))}
+                    </div>
+                  </div>
+                )
+              })()}
+
             </div>
 
-            <div className="mt-5 flex gap-2">
+            {/* Modal footer */}
+            <div className="flex gap-2 p-6 pt-4 border-t border-exam-border flex-shrink-0 flex-wrap">
+              <button
+                onClick={() => {
+                  router.push(`/admin/candidates/${selected.id}?exam_id=${EXAM_ID}`)
+                  setSelected(null)
+                  setSelectedViolations([])
+                }}
+                className="flex-1 py-2.5 bg-exam-blue text-white rounded-xl text-sm font-semibold
+                           hover:bg-blue-700 transition-colors min-w-[120px]"
+              >
+                🔍 Full Audit Page
+              </button>
+              {IS_DEV && (
+                <button
+                  onClick={() => handleResetScore(selected)}
+                  className="flex-1 py-2.5 bg-purple-600 text-white rounded-xl text-sm font-semibold
+                             hover:bg-purple-700 transition-colors min-w-[120px]"
+                  title="DEV only — resets Redis score + deletes violations from MySQL"
+                >
+                  🔄 Reset Score
+                </button>
+              )}
               <button
                 onClick={() => handleBlockCandidate(selected.id)}
                 className="flex-1 py-2.5 bg-red-600 text-white rounded-xl text-sm font-semibold
-                           hover:bg-red-700 transition-colors"
+                           hover:bg-red-700 transition-colors min-w-[120px]"
               >
                 Block Candidate
               </button>
-              <button onClick={() => setSelected(null)}
+              <button onClick={() => { setSelected(null); setSelectedViolations([]) }}
                 className="flex-1 py-2.5 border border-exam-border rounded-xl text-sm font-medium
-                           hover:bg-gray-50 transition-colors">
+                           hover:bg-gray-50 transition-colors min-w-[80px]">
                 Close
               </button>
             </div>

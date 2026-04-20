@@ -15,7 +15,8 @@ import QuestionGrid from '@/components/exam/QuestionGrid'
 import ExamTimer from '@/components/exam/ExamTimer'
 import { VoiceMonitor } from '@/lib/proctoring/VoiceMonitor'
 import { SnapshotWorker } from '@/lib/proctoring/SnapshotWorker'
-import { getExamInfo, startExam, submitExam, getQuestionBatch } from '@/lib/api/client'
+import { GazeTracker } from '@/lib/proctoring/GazeTracker'
+import { getExamInfo, startExam, submitExam, getQuestionBatch, reportViolation } from '@/lib/api/client'
 import { clsx } from 'clsx'
 
 export default function ExamPage() {
@@ -23,6 +24,8 @@ export default function ExamPage() {
   const videoRef = useRef(null)
   const voiceMonitorRef = useRef(null)
   const snapshotWorkerRef = useRef(null)
+  const gazeTrackerRef = useRef(null)
+  const proctoringStarted = useRef(false)  // guard against Strict Mode double-invoke
   const [showSubmitDialog, setShowSubmitDialog] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [sidebarTab, setSidebarTab] = useState('grid') // 'grid' | 'info'
@@ -49,14 +52,18 @@ export default function ExamPage() {
   useEffect(() => {
     if (!jwt || !examId) return
 
+    let cancelled = false  // guard against React Strict Mode double-invoke + async race
+
     const load = async () => {
       try {
         const res = await getExamInfo(examId)
+        if (cancelled) return
         const exam = res.data
 
         // Officially start the exam — this records exam_started_at for the candidate
         // and returns the authoritative end_time (fresh if the scheduled one expired).
         const startRes = await startExam(examId)
+        if (cancelled) return
         const endTime = startRes.data.end_time
 
         setExamMeta({
@@ -69,10 +76,11 @@ export default function ExamPage() {
 
         // Load first batch of questions
         const batchRes = await getQuestionBatch(examId, 0)
+        if (cancelled) return
         setQuestions(batchRes.data.questions)
         setExamLoaded(true)
       } catch (err) {
-        setLoadError('Failed to load exam. Please check your connection and try again.')
+        if (!cancelled) setLoadError('Failed to load exam. Please check your connection and try again.')
       }
     }
 
@@ -118,6 +126,7 @@ export default function ExamPage() {
     })
 
     return () => {
+      cancelled = true
       offConnected(); offDisconnected(); offUnavailable(); offRecovered()
       offBulkSync(); offAck()
       offPause(); offResume(); offScore(); offTimeUpdate()
@@ -127,34 +136,51 @@ export default function ExamPage() {
   // Start proctoring when exam loads
   useEffect(() => {
     if (!examLoaded) return
+    // Guard: React 18 Strict Mode double-invokes effects in dev.
+    // This flag prevents double-starting all workers and double-sending the first violation.
+    if (proctoringStarted.current) return
+    proctoringStarted.current = true
 
-    // Start voice monitoring
+    // Central violation reporter — sends to both REST (authoritative) and WS (best-effort)
+    const sendProctoringViolation = (violation) => {
+      addViolation(violation)
+      reportViolation(examId, { type: violation.type, severity: violation.severity }).catch(() => {})
+      wsClient.sendViolation({ ...violation, examId, candidateId })
+    }
+
+    // ── Voice Monitor ────────────────────────────────────────────────────────
     const vm = new VoiceMonitor()
     voiceMonitorRef.current = vm
-    vm.start((violation) => {
-      addViolation(violation)
-      wsClient.sendViolation({ ...violation, examId, candidateId })
-    })
+    vm.start(sendProctoringViolation)
 
-    // Start snapshot worker (requires webcam access)
+    // ── Snapshot Worker + Gaze Tracker (both need webcam) ────────────────────
     navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 } })
       .then((stream) => {
         if (videoRef.current) {
           videoRef.current.srcObject = stream
           videoRef.current.play()
         }
+
+        // Snapshot worker — captures JPEG every 2 min and uploads to S3
         const sw = new SnapshotWorker()
         snapshotWorkerRef.current = sw
         sw.start(videoRef.current, examId, candidateId)
+
+        // Gaze tracker — MediaPipe FaceMesh, detects look-away > 3s
+        const gt = new GazeTracker()
+        gazeTrackerRef.current = gt
+        gt.start(videoRef.current, sendProctoringViolation)
       })
       .catch(() => {
         // Webcam unavailable mid-exam — flag but continue
-        wsClient.sendViolation({ type: 'camera_unavailable', severity: 3, examId, candidateId })
+        sendProctoringViolation({ type: 'camera_unavailable', severity: 3 })
       })
 
     return () => {
+      proctoringStarted.current = false
       voiceMonitorRef.current?.stop()
       snapshotWorkerRef.current?.stop()
+      gazeTrackerRef.current?.stop()
     }
   }, [examLoaded, examId, candidateId, addViolation])
 
@@ -256,7 +282,7 @@ export default function ExamPage() {
             )}>
               {connectionStatus === 'connected'    ? '● Connected' :
                connectionStatus === 'reconnecting' ? '● Connecting...' :
-               /* offline */                         '● Saving locally'}
+               /* offline */                         '● Offline mode'}
             </div>
           </div>
           <div className="flex items-center gap-3">
@@ -298,14 +324,14 @@ export default function ExamPage() {
                   <button
                     onClick={() => handleNavigate(Math.max(0, currentQuestion - 1))}
                     disabled={currentQuestion === 0}
-                    className="px-3 py-1.5 text-sm border border-exam-border rounded-lg disabled:opacity-40 hover:bg-gray-50 transition-colors"
+                    className="flex items-center gap-1.5 px-4 py-1.5 text-sm font-semibold rounded-lg border-2 border-exam-blue text-exam-blue bg-white hover:bg-exam-blue hover:text-white active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-white disabled:hover:text-exam-blue transition-all duration-150"
                   >
                     ← Prev
                   </button>
                   <button
                     onClick={() => handleNavigate(Math.min(totalQ - 1, currentQuestion + 1))}
                     disabled={currentQuestion === totalQ - 1}
-                    className="px-3 py-1.5 text-sm border border-exam-border rounded-lg disabled:opacity-40 hover:bg-gray-50 transition-colors"
+                    className="flex items-center gap-1.5 px-4 py-1.5 text-sm font-semibold rounded-lg bg-exam-blue text-white hover:bg-blue-700 active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-exam-blue transition-all duration-150"
                   >
                     Next →
                   </button>

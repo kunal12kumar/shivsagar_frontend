@@ -9,6 +9,8 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@mediapipe/camera_utils": "^0.3.1675466862",
+    "@mediapipe/face_mesh": "^0.4.1633559619",
     "@tanstack/react-query": "^5.99.0",
     "axios": "^1.15.0",
     "clsx": "^2.1.1",
@@ -18,6 +20,7 @@
     "next": "14.2.35",
     "react": "^18",
     "react-dom": "^18",
+    "react-hot-toast": "^2.6.0",
     "react-window": "^2.2.7",
     "reconnecting-websocket": "^4.4.0",
     "tailwind-merge": "^3.5.0",

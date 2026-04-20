@@ -42,8 +42,26 @@ export const adminMe      = ()        => adminClient.get('/admin/auth/me')
 
 // ── Candidates ────────────────────────────────────────────────────────────────
 export const getCandidates   = (examId = 1) => adminClient.get(`/admin/candidates?exam_id=${examId}`)
+export const addCandidate    = (data)       => adminClient.post('/admin/candidates', data)
+export const bulkImportCandidates = (file, examId = 1) => {
+  const form = new FormData()
+  form.append('file', file)
+  return adminClient.post(`/admin/candidates/bulk?exam_id=${examId}`, form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+}
+export const deleteCandidate = (candidateId) => adminClient.delete(`/admin/candidates/${candidateId}`)
 export const getViolations   = (examId = 1, limit = 100) =>
   adminClient.get(`/admin/violations?exam_id=${examId}&limit=${limit}`)
+export const getCandidateViolations = (candidateId, examId = 1, limit = 100) =>
+  adminClient.get(`/admin/candidates/${candidateId}/violations?exam_id=${examId}&limit=${limit}`)
+export const getCandidateSnapshots = (candidateId, examId = 1) =>
+  adminClient.get(`/admin/candidates/${candidateId}/snapshots?exam_id=${examId}`)
+export const resetCandidateScore = (candidateId, examId = 1) =>
+  adminClient.post(`/admin/candidates/${candidateId}/reset-score?exam_id=${examId}`)
+export const getCandidateAnswers = (candidateId, examId = 1) =>
+  adminClient.get(`/admin/candidates/${candidateId}/answers?exam_id=${examId}`)
+export const getLiveScores   = (examId = 1) => adminClient.get(`/admin/exams/${examId}/scores`)
 
 // ── Exam control ──────────────────────────────────────────────────────────────
 export const controlExam     = (examId, action) =>

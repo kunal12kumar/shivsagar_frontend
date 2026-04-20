@@ -13,7 +13,14 @@ export class VoiceMonitor {
     this.speechStartTime = null
     this.examActive = false
     this.SPEECH_THRESHOLD_MS = 5000 // 5 seconds of continuous talking = violation
-    this.KEYWORDS = ['hey siri', 'ok google', 'alexa', 'google', 'siri', 'cortana']
+    this.KEYWORDS = [
+      // Voice assistants
+      'hey siri', 'ok google', 'alexa', 'hey google', 'cortana', 'hey cortana',
+      'siri', 'google', 'alexa',
+      // AI / LLM tools
+      'chatgpt', 'chat gpt', 'gpt', 'claude', 'gemini', 'copilot', 'perplexity',
+      'open ai', 'openai', 'bard', 'llm', 'ai answer', 'solve this',
+    ]
   }
 
   start(onViolation) {

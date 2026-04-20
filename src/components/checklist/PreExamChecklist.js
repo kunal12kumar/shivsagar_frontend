@@ -160,11 +160,23 @@ export default function PreExamChecklist({ examId, candidateId, onComplete }) {
     }
 
     // 5. Multiple monitors
+    // DEV  → Option B: soft flag only, exam proceeds (console warning logged)
+    // PROD → Option A: hard block, candidate cannot start until monitor is disconnected
     setStatus('monitor', 'running')
     await new Promise(r => setTimeout(r, 300))
     const isExtended = window.screen?.isExtended
     if (isExtended) {
-      setStatus('monitor', 'warn', 'Multiple monitors detected — flagged for faculty review')
+      if (process.env.NODE_ENV === 'development') {
+        // Option B — warn, do NOT set blocked
+        console.warn('[DEV] Multiple monitors detected — hard-blocked in production (Option A)')
+        setStatus('monitor', 'warn',
+          '[DEV mode] Multiple monitors detected — exam continues (would block in production)')
+      } else {
+        // Option A — hard block, candidate must disconnect before proceeding
+        setStatus('monitor', 'fail',
+          'Multiple monitors detected. Please disconnect your external monitor and run the check again.')
+        blocked = true
+      }
     } else {
       setStatus('monitor', 'pass', 'Single monitor confirmed ✓')
     }
