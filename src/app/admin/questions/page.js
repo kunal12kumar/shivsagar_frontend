@@ -22,7 +22,7 @@ import {
   uploadQuestionImage,
   uploadExamPdf, getExtractionProgress, listExtractions, retryExtraction,
   goLiveQuestions, deleteExtraction,
-  getAdminRole,
+  getAdminRole, startExam,
 } from '@/lib/api/adminClient'
 
 // ── Subject options ──────────────────────────────────────────────────────────
@@ -1418,6 +1418,8 @@ export default function QuestionsPage() {
   const [delExConfirm, setDelExConfirm] = useState(null)       // extraction to delete
   const [search,       setSearch]       = useState('')
   const [filterSubj,   setFilterSubj]   = useState('All')
+  const [startExamLoading, setStartExamLoading] = useState(false)
+  const [startExamSuccess, setStartExamSuccess] = useState(false)
 
   // Load exams on mount
   useEffect(() => {
@@ -1450,6 +1452,27 @@ export default function QuestionsPage() {
     if (!selectedExam) return
     listQuestions(selectedExam.id).then(({ data }) => setQuestions(data))
   }, [selectedExam])
+
+  // Start exam (go live manually without PDF extraction)
+  async function handleStartExam() {
+    if (!selectedExam) return
+    if (!window.confirm(`Start "${selectedExam.title}" now? Candidates will be able to attempt it immediately.`)) return
+    setStartExamLoading(true)
+    setStartExamSuccess(false)
+    try {
+      await startExam(selectedExam.id)
+      setStartExamSuccess(true)
+      // Refresh exam list so status badge updates
+      const { data } = await listExams()
+      setExams(data)
+      const updated = data.find(ex => ex.id === selectedExam.id)
+      if (updated) setSelectedExam(updated)
+    } catch (e) {
+      alert(e.response?.data?.detail || 'Failed to start exam — check server logs')
+    } finally {
+      setStartExamLoading(false)
+    }
+  }
 
   // Delete
   async function handleDelete(id) {
@@ -1575,6 +1598,31 @@ export default function QuestionsPage() {
                     'text-blue-700'
                   }`}>{selectedExam.status?.toUpperCase()}</p>
                 </div>
+
+                {/* Start Exam button — only for draft/scheduled with at least 1 question */}
+                {(selectedExam.status === 'draft' || selectedExam.status === 'scheduled') &&
+                  (selectedExam.question_count ?? 0) > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleStartExam}
+                    disabled={startExamLoading}
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: '8px',
+                      padding: '10px 22px',
+                      background: startExamSuccess ? '#ecfdf5' : '#16a34a',
+                      color: startExamSuccess ? '#065f46' : '#fff',
+                      fontSize: '14px', fontWeight: 700,
+                      borderRadius: '12px',
+                      border: startExamSuccess ? '2px solid #6ee7b7' : 'none',
+                      cursor: startExamLoading ? 'wait' : 'pointer',
+                      opacity: startExamLoading ? 0.7 : 1,
+                      whiteSpace: 'nowrap',
+                      boxShadow: startExamSuccess ? 'none' : '0 2px 8px rgba(22,163,74,0.3)',
+                    }}
+                  >
+                    {startExamLoading ? '⏳ Starting…' : startExamSuccess ? '✓ Exam Live!' : '🚀 Start Exam'}
+                  </button>
+                )}
               </div>
             )}
           </div>
