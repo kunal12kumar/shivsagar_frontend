@@ -35,7 +35,7 @@ export default function ChecklistPage() {
           <PreExamChecklist
             examId={examId}
             candidateId={candidateId}
-            onComplete={() => router.push('/instructions')}
+            onComplete={() => router.push('/exam')}
           />
         </div>
       </div>

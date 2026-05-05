@@ -30,6 +30,7 @@ adminClient.interceptors.response.use(
     if (err.response?.status === 401 && typeof window !== 'undefined') {
       localStorage.removeItem('rgipt-admin-token')
       localStorage.removeItem('rgipt-admin-email')
+      localStorage.removeItem('rgipt-admin-role')
       window.location.href = '/admin/login'
     }
     return Promise.reject(err)
@@ -41,7 +42,10 @@ export const adminLogin   = (data)    => adminClient.post('/admin/auth/login', d
 export const adminMe      = ()        => adminClient.get('/admin/auth/me')
 
 // ── Candidates ────────────────────────────────────────────────────────────────
-export const getCandidates   = (examId = 1) => adminClient.get(`/admin/candidates?exam_id=${examId}`)
+// No exam_id filter — returns ALL candidates regardless of which exam they were registered under.
+// exam_id is still forwarded if provided so the backend can use it for live scores/violations.
+export const getCandidates   = (examId = null) =>
+  adminClient.get(examId != null ? `/admin/candidates?exam_id=${examId}` : '/admin/candidates')
 export const addCandidate    = (data)       => adminClient.post('/admin/candidates', data)
 export const bulkImportCandidates = (file, examId = 1) => {
   const form = new FormData()
@@ -67,6 +71,7 @@ export const getLiveScores   = (examId = 1) => adminClient.get(`/admin/exams/${e
 export const controlExam     = (examId, action) =>
   adminClient.post(`/admin/exams/${examId}/control`, { action })
 export const startExam       = (examId) => adminClient.post(`/admin/exams/${examId}/start`)
+export const endExam         = (examId) => adminClient.post(`/admin/exams/${examId}/control`, { action: 'complete' })
 
 // ── Results ───────────────────────────────────────────────────────────────────
 export const getResults      = (examId) => adminClient.get(`/admin/exams/${examId}/results`)
@@ -97,5 +102,76 @@ export const uploadQuestionImage = (imageFile) => {
     headers: { 'Content-Type': 'multipart/form-data' },
   })
 }
+
+// ── Question extraction (PDF → AI extract → review) ──────────────────────────
+export const uploadExamPdf = (file, title, expectedQuestions = 100, onUploadProgress) => {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('title', title)
+  form.append('expected_questions', String(expectedQuestions))
+  return adminClient.post('/admin/extractions/upload-pdf', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 120000,        // PDFs up to 50MB — give the upload time
+    onUploadProgress,
+  })
+}
+export const getExtractionProgress = (extractionId) =>
+  adminClient.get(`/admin/extractions/${extractionId}/progress`, { timeout: 30000 })
+export const listExtractions = () =>
+  adminClient.get('/admin/extractions')
+export const retryExtraction = (extractionId) =>
+  adminClient.post(`/admin/extractions/${extractionId}/retry`, {}, { timeout: 30000 })
+
+// ── Extraction review (Phase 2) ───────────────────────────────────────────────
+export const listExtractedQuestions = (extractionId, status) =>
+  adminClient.get(`/admin/extractions/${extractionId}/questions${status ? `?status=${status}` : ''}`)
+export const getReviewStats        = (extractionId) =>
+  adminClient.get(`/admin/extractions/${extractionId}/review-stats`)
+export const updateExtractedQuestion = (questionId, data) =>
+  adminClient.patch(`/admin/extractions/questions/${questionId}`, data)
+export const approveQuestion       = (questionId) =>
+  adminClient.post(`/admin/extractions/questions/${questionId}/approve`)
+export const rejectQuestion        = (questionId) =>
+  adminClient.post(`/admin/extractions/questions/${questionId}/reject`)
+export const skipQuestion          = (questionId) =>
+  adminClient.post(`/admin/extractions/questions/${questionId}/skip`)
+export const uploadExtractedQuestionImage = (questionId, imageFile) => {
+  const form = new FormData()
+  form.append('image', imageFile)
+  return adminClient.post(
+    `/admin/extractions/questions/${questionId}/upload-question-image`,
+    form,
+    { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 60000 },
+  )
+}
+export const uploadOptionImage     = (questionId, optionLetter, imageFile) => {
+  const form = new FormData()
+  form.append('option_letter', optionLetter)
+  form.append('image', imageFile)
+  return adminClient.post(
+    `/admin/extractions/questions/${questionId}/upload-option-image`,
+    form,
+    { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 60000 },
+  )
+}
+export const getExtractionPageUrls = (extractionId) =>
+  adminClient.get(`/admin/extractions/${extractionId}/page-urls`, { timeout: 30000 })
+
+// ── Go-Live (exam_controller only) ────────────────────────────────────────────
+export const goLiveQuestions = (examId, extractionId, replaceExisting = true) =>
+  adminClient.post(`/admin/exams/${examId}/go-live`, {
+    extraction_id: extractionId,
+    replace_existing: replaceExisting,
+  })
+
+// ── Delete extraction ─────────────────────────────────────────────────────────
+export const deleteExtraction = (extractionId) =>
+  adminClient.delete(`/admin/extractions/${extractionId}`)
+
+// ── Role helpers (read from localStorage) ────────────────────────────────────
+export const getAdminRole    = () =>
+  typeof window !== 'undefined' ? (localStorage.getItem('rgipt-admin-role') || '') : ''
+export const isQuestionManager = () => getAdminRole() === 'question_manager'
+export const isExamController  = () => getAdminRole() === 'exam_controller'
 
 export default adminClient

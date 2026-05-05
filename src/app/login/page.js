@@ -59,7 +59,9 @@ export default function LoginPage() {
         candidateEmail: candidate.email,
         examId: candidate.exam_id,
       })
-      router.push('/checklist')
+      // Always go to instructions — the exam page will check per-exam submission
+      // status via the backend (409 from startExam) and redirect if needed.
+      router.push('/instructions')
     } catch (err) {
       setError(err.response?.data?.detail || 'Invalid OTP. Please try again.')
     } finally {

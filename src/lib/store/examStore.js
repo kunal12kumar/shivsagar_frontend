@@ -2,6 +2,28 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 
+// Seeded PRNG (mulberry32) — deterministic shuffle per candidate_id.
+// Same candidate always sees the same question order across refreshes.
+function _seededRand(seed) {
+  let s = (seed >>> 0) || 1
+  return () => {
+    s += 0x6D2B79F5
+    let t = Math.imul(s ^ (s >>> 15), 1 | s)
+    t = t + Math.imul(t ^ (t >>> 7), 61 | t) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+function _shuffled(arr, seed) {
+  const out = [...arr]
+  const rand = _seededRand(seed)
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]]
+  }
+  return out
+}
+
 /**
  * examStore — central state for the active exam session.
  * Uses localStorage persistence so answers survive a browser refresh or network drop.
@@ -28,7 +50,8 @@ const useExamStore = create(
       examTitle: '',
       totalQuestions: 0,
       examDuration: 180, // minutes
-      serverEndTime: null, // ISO string from server — authoritative
+      serverEndTime: null,          // ISO string from server — authoritative end time
+      questionsAvailableAt: null,   // ISO string — show questions after this time (post-countdown)
 
       // Questions (decrypted batch)
       questions: [],
@@ -45,6 +68,8 @@ const useExamStore = create(
 
       // Exam status
       examStatus: 'not_started', // not_started | active | paused | submitted
+      // Which exam_id was submitted — used to allow re-entry into a DIFFERENT exam
+      submittedExamId: null,
       isConnected: false,
       isLowBandwidth: false,
 
@@ -56,7 +81,13 @@ const useExamStore = create(
       // Actions
       setAuth: (data) => set(data),
       setExamMeta: (data) => set(data),
-      setQuestions: (questions) => set({ questions }),
+      setQuestions: (questions) => {
+        // Shuffle deterministically by candidateId so each student sees a unique
+        // order that stays stable across refreshes. Also resets to question 1
+        // so a previous session's position in localStorage doesn't carry over.
+        const seed = get().candidateId || 0
+        set({ questions: _shuffled(questions, seed), currentQuestion: 0 })
+      },
       setCurrentQuestion: (idx) => set({ currentQuestion: idx }),
 
       setAnswer: (questionId, answer) => {
@@ -110,7 +141,8 @@ const useExamStore = create(
       reset: () => set({
         candidateId: null, jwt: null, examId: null, questions: [],
         answers: {}, answerStatus: {}, markedForReview: {},
-        examStatus: 'not_started', violations: [], integrityScore: 0,
+        examStatus: 'not_started', submittedExamId: null,
+        violations: [], integrityScore: 0,
       }),
     }),
     {
@@ -133,7 +165,11 @@ const useExamStore = create(
         answerStatus: state.answerStatus,
         markedForReview: state.markedForReview,
         serverEndTime: state.serverEndTime,
+        questionsAvailableAt: state.questionsAvailableAt,
         currentQuestion: state.currentQuestion,
+        // Persist submission state per-exam so a new exam can still be attempted
+        examStatus: state.examStatus,
+        submittedExamId: state.submittedExamId,
       }),
     }
   )

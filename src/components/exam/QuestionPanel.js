@@ -132,17 +132,21 @@ export default function QuestionPanel({ question, questionNumber, totalQuestions
     Object.values(question.option_images).some(Boolean)
 
   // ── Answer selection logic ────────────────────────────────────────────────
-  // Answers are stored as the LETTER key ('A'/'B'/'C'/'D') — matches DB correct_answer
+  // Answers are stored as the LETTER key ('A'/'B'/'C'/'D') — matches DB correct_answer.
+  // NOTE: questions extracted from PDFs may arrive with type='text' or 'visual' instead of
+  // 'single_mcq' — we treat ANY non-multi, non-numerical type as single MCQ so clicking
+  // always works regardless of what the backend stored.
   const handleOptionSelect = (label) => {
-    if (question.type === 'single_mcq') {
-      // Toggle off if clicking the already-selected option
-      setAnswer(question.id, currentAnswer === label ? null : label)
-    } else if (question.type === 'multi_mcq') {
+    if (question.type === 'multi_mcq') {
       const prev = Array.isArray(currentAnswer) ? currentAnswer : []
       const next = prev.includes(label)
         ? prev.filter((x) => x !== label)
         : [...prev, label]
       setAnswer(question.id, next.length > 0 ? next : null)
+    } else if (question.type !== 'numerical') {
+      // Covers: 'single_mcq', 'text', 'visual', null, undefined, or any other MCQ variant
+      // Toggle off if the same option is clicked again
+      setAnswer(question.id, currentAnswer === label ? null : label)
     }
   }
 

@@ -45,11 +45,16 @@ export const sendOTP = (data) => apiClient.post('/auth/otp/send', data)
 export const verifyOTP = (data) => apiClient.post('/auth/otp/verify', data)
 
 // --- Exam ---
+export const getActiveExam = () => apiClient.get('/exams/active')
 export const getExamInfo = (examId) => apiClient.get(`/exams/${examId}`)
 export const startExam = (examId) => apiClient.post(`/exams/${examId}/start`)
 export const submitExam = (examId, answers) => apiClient.post(`/exams/${examId}/submit`, { answers })
 
 // --- Questions ---
+// Load the entire question paper in one request (preferred — shows all 100 questions at once)
+export const getAllQuestions = (examId) =>
+  apiClient.get(`/exams/${examId}/questions/all`, { timeout: 30000 })
+// Legacy batch loader (kept for reference; no longer used by the exam page)
 export const getQuestionBatch = (examId, batchNum) =>
   apiClient.get(`/exams/${examId}/questions/batch/${batchNum}`)
 

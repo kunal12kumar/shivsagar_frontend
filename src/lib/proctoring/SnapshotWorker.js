@@ -1,10 +1,10 @@
 /**
- * SnapshotWorker — captures webcam snapshots every 2 minutes.
+ * SnapshotWorker — captures webcam snapshots every 1 minute.
  * Compresses to JPEG quality 60%, max 320×240px, ~15KB each.
  * Uploads to S3 via the FastAPI /snapshots endpoint (async, non-blocking).
  * If upload fails, retries once after 30s. Exam continues regardless.
  *
- * Bandwidth: 15KB × 90 snapshots = ~1.35MB over 3 hours (negligible).
+ * Bandwidth: 15KB × 180 snapshots = ~2.7MB over 3 hours (negligible).
  */
 import apiClient from '../api/client'
 
@@ -14,7 +14,7 @@ export class SnapshotWorker {
     this.videoEl = null
     this.examId = null
     this.candidateId = null
-    this.INTERVAL_MS = 2 * 60 * 1000 // every 2 minutes
+    this.INTERVAL_MS = 1 * 60 * 1000 // every 1 minute
     this.canvas = null
   }
 
@@ -28,7 +28,7 @@ export class SnapshotWorker {
     this.canvas.width = 320
     this.canvas.height = 240
 
-    // Take first snapshot immediately, then every 2 minutes
+    // Take first snapshot immediately, then every 1 minute
     this._capture()
     this.intervalId = setInterval(() => this._capture(), this.INTERVAL_MS)
   }

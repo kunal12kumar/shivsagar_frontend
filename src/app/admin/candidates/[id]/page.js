@@ -605,7 +605,7 @@ export default function CandidateAuditPage() {
                 <div className="text-3xl mb-2">📷</div>
                 <p className="text-exam-muted text-sm">No snapshots found for this candidate.</p>
                 <p className="text-xs text-gray-400 mt-1">
-                  Snapshots are uploaded every 30s during the exam. They appear here if AWS S3 is configured.
+                  Snapshots are uploaded every 1 minute during the exam. They appear here once the candidate starts the exam.
                 </p>
               </div>
             ) : (

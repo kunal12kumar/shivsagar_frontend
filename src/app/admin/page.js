@@ -17,15 +17,15 @@ import toast from 'react-hot-toast'
 import { fmtIST, fmtISTTime, fmtRelative } from '@/lib/utils/time'
 import {
   getCandidates, getViolations, controlExam,
-  startExam, getResults, computeResults, indexFace,
+  startExam, endExam, getResults, computeResults, indexFace,
   getCandidateViolations, getLiveScores, resetCandidateScore,
   addCandidate, bulkImportCandidates, deleteCandidate,
+  listExams, getAdminRole,
 } from '@/lib/api/adminClient'
 import { clsx } from 'clsx'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const EXAM_ID = 1
 const IS_DEV = process.env.NODE_ENV === 'development'
 
 const SEV_LABEL = { 1:'Low', 2:'Low', 3:'Medium', 4:'Medium', 5:'High', 6:'Critical', 7:'Critical', 8:'Critical' }
@@ -185,6 +185,33 @@ function TabButton({ active, onClick, children }) {
   )
 }
 
+// ── Live countdown badge shown on exam control status bar ─────────────────────
+function ExamCountdownBadge({ endTime }) {
+  const [secs, setSecs] = useState(() => Math.max(0, Math.floor((new Date(endTime) - Date.now()) / 1000)))
+  useEffect(() => {
+    if (secs <= 0) return
+    const t = setInterval(() => setSecs(s => Math.max(0, s - 1)), 1000)
+    return () => clearInterval(t)
+  }, [secs])
+  const h = Math.floor(secs / 3600)
+  const m = Math.floor((secs % 3600) / 60)
+  const s = secs % 60
+  const label = h > 0
+    ? `${h}h ${String(m).padStart(2,'0')}m`
+    : `${m}:${String(s).padStart(2,'0')}`
+  return (
+    <div className={clsx(
+      'text-center px-4 py-2 rounded-xl border flex-shrink-0',
+      secs <= 300 ? 'bg-red-50 border-red-200' : 'bg-green-50 border-green-200'
+    )}>
+      <p className={clsx('text-xl font-bold tabular-nums', secs <= 300 ? 'text-red-600' : 'text-green-700')}>
+        {secs === 0 ? 'ENDED' : label}
+      </p>
+      <p className="text-xs text-gray-500">remaining</p>
+    </div>
+  )
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function AdminDashboard() {
@@ -193,6 +220,13 @@ export default function AdminDashboard() {
   // ── Auth state
   const [adminEmail, setAdminEmail] = useState('')
   const [authReady, setAuthReady]   = useState(false)
+
+  // ── Active exam state (replaces hardcoded EXAM_ID = 1)
+  const [activeExam,   setActiveExam]   = useState(null)   // full exam object
+  const [examLoading,  setExamLoading]  = useState(true)
+
+  // Derived: always use the active exam's ID (fallback to 1 for safety)
+  const EXAM_ID = activeExam?.id ?? 1
 
   // ── Data state
   const [candidates, setCandidates] = useState([])
@@ -226,23 +260,54 @@ export default function AdminDashboard() {
 
   const WS_BASE = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:3001'
 
-  // ── Auth check ────────────────────────────────────────────────────────────
+  // ── Auth check (exam_controller only) ───────────────────────────────────────
   useEffect(() => {
     const token = localStorage.getItem('rgipt-admin-token')
     const email = localStorage.getItem('rgipt-admin-email')
+    const role  = getAdminRole()
     if (!token) {
       router.replace('/admin/login')
+      return
+    }
+    // question_manager should be on /admin/questions, not here
+    if (role && role !== 'exam_controller') {
+      router.replace('/admin/questions')
       return
     }
     setAdminEmail(email || 'Admin')
     setAuthReady(true)
   }, [router])
 
-  // ── Load data
+  // ── Load active exam first, then candidates/violations ──────────────────────
   useEffect(() => {
     if (!authReady) return
 
-    Promise.all([getCandidates(EXAM_ID), getViolations(EXAM_ID)])
+    // Find the most relevant exam: ACTIVE first, then most recent
+    listExams()
+      .then(({ data }) => {
+        const exams = data || []
+        const active = exams.find(e => e.status === 'active')
+          || exams.find(e => e.status === 'paused')
+          || exams[0]   // most recent (list is ordered by created_at desc)
+        if (active) {
+          setActiveExam(active)
+          // Auto-mark as COMPLETED if end_time has passed
+          if (active.end_time && new Date(active.end_time) < new Date() && active.status === 'active') {
+            endExam(active.id).catch(() => {})  // silent — server will mark it
+            setActiveExam(e => e ? { ...e, status: 'completed' } : e)
+          }
+        }
+      })
+      .catch(() => {})
+      .finally(() => setExamLoading(false))
+  }, [authReady])
+
+  // ── Load data
+  useEffect(() => {
+    if (!authReady || examLoading) return
+
+    // getCandidates() with no arg returns ALL candidates regardless of exam_id
+    Promise.all([getCandidates(), getViolations(EXAM_ID)])
       .then(([cRes, vRes]) => {
         setCandidates(cRes.data)
         setViolations(vRes.data.slice(0, 100))
@@ -297,7 +362,7 @@ export default function AdminDashboard() {
       if (pollRef.current) clearInterval(pollRef.current)
       if (resultsPollRef.current) clearInterval(resultsPollRef.current)
     }
-  }, [authReady, WS_BASE])
+  }, [authReady, examLoading, WS_BASE])   // examLoading must be here — data load fires only after exam fetch completes
 
   // ── Computed ──────────────────────────────────────────────────────────────
   const filtered = candidates.filter(c =>
@@ -324,23 +389,40 @@ export default function AdminDashboard() {
   }
 
   const handleStartExam = async () => {
-    if (!await confirmToast('Start the exam now? This sets status = ACTIVE and broadcasts to all candidates.')) return
+    if (!await confirmToast('Start the exam now? This sets status = ACTIVE and starts the 15-minute candidate countdown.')) return
     const toastId = toast.loading('Starting exam…')
     try {
-      await startExam(EXAM_ID)
-      toast.success('Exam started! All candidates notified.', { id: toastId })
+      const res = await startExam(EXAM_ID)
+      toast.success('Exam started! Candidates will see a 15-minute countdown.', { id: toastId })
+      // Refresh exam state
+      const { data } = await listExams()
+      const updated = (data || []).find(e => e.id === EXAM_ID)
+      if (updated) setActiveExam(updated)
     } catch (err) {
       toast.error(err.response?.data?.detail || 'Failed to start exam', { id: toastId })
     }
   }
 
+  const handleEndExam = async () => {
+    if (!await confirmToast('End the exam now for ALL candidates? This cannot be undone.', { danger: true })) return
+    const toastId = toast.loading('Ending exam…')
+    try {
+      await endExam(EXAM_ID)
+      toast.success('Exam ended. Candidates have been notified.', { id: toastId })
+      setActiveExam(e => e ? { ...e, status: 'completed' } : e)
+    } catch (err) {
+      toast.error(err.response?.data?.detail || 'Failed to end exam', { id: toastId })
+    }
+  }
+
   // Silent poll — called automatically every 30s while Results tab is open
+  // EXAM_ID must be in deps — otherwise the closure captures the stale value from mount (exam_id=1)
   const loadResultsSilent = useCallback(async () => {
     try {
       const res = await getResults(EXAM_ID)
       if (res.data.length > 0) setResults(res.data)
     } catch { /* silent — don't show errors on auto-poll */ }
-  }, [])
+  }, [EXAM_ID])
 
   // Manual refresh button — shows feedback
   const handleLoadResults = async () => {
@@ -500,7 +582,7 @@ export default function AdminDashboard() {
       const res = await bulkImportCandidates(bulkFile, EXAM_ID)
       setBulkResult(res.data)
       // Refresh candidate list so new rows appear immediately
-      const cRes = await getCandidates(EXAM_ID)
+      const cRes = await getCandidates()
       setCandidates(cRes.data)
       if (res.data.added > 0) {
         toast.success(`✓ ${res.data.added} candidate(s) imported`, { id: toastId })
@@ -532,6 +614,7 @@ export default function AdminDashboard() {
   const handleLogout = () => {
     localStorage.removeItem('rgipt-admin-token')
     localStorage.removeItem('rgipt-admin-email')
+    localStorage.removeItem('rgipt-admin-role')
     router.push('/admin/login')
   }
 
@@ -590,8 +673,9 @@ export default function AdminDashboard() {
             }}>
               📊 Scoring Guide
             </TabButton>
-            <TabButton active={false} onClick={() => router.push('/admin/questions')}>
-              📚 Questions
+            <TabButton active={false} onClick={() => router.push('/admin/live')}
+              className="bg-green-600 hover:bg-green-700 text-white border-green-600">
+              🚀 Live Questions
             </TabButton>
           </nav>
         </div>
@@ -617,23 +701,6 @@ export default function AdminDashboard() {
             <StatCard label="Connected" value={stats.connected} color="text-green-600"  />
             <StatCard label="Watch"     value={stats.watch}     color="text-amber-600"  sub="Score 20–39" />
             <StatCard label="Flagged"   value={stats.flagged}   color="text-red-600"    sub="Score ≥ 40 🚨" />
-          </div>
-
-          {/* Emergency controls bar */}
-          <div className="bg-white rounded-2xl border border-exam-border px-4 py-3 flex flex-wrap gap-2 items-center">
-            <span className="text-xs font-semibold text-exam-muted uppercase tracking-wide mr-2">Emergency:</span>
-            <button onClick={() => handleControl('pause',   'Pause exam for all candidates?')}
-              className="px-3 py-1.5 text-xs bg-amber-50 text-amber-700 border border-amber-200 rounded-lg font-medium hover:bg-amber-100">
-              ⏸ Pause All
-            </button>
-            <button onClick={() => handleControl('resume',  'Resume exam for all candidates?')}
-              className="px-3 py-1.5 text-xs bg-green-50 text-green-700 border border-green-200 rounded-lg font-medium hover:bg-green-100">
-              ▶ Resume All
-            </button>
-            <button onClick={() => handleControl('extend', 'Extend exam time by 15 minutes?')}
-              className="px-3 py-1.5 text-xs bg-blue-50 text-blue-700 border border-blue-200 rounded-lg font-medium hover:bg-blue-100">
-              +15 min
-            </button>
           </div>
 
           {/* Candidate grid + violation feed */}
@@ -779,12 +846,9 @@ export default function AdminDashboard() {
                 <div className="text-4xl mb-3">🏆</div>
                 <p className="mb-3">No results yet.</p>
                 <p className="text-sm max-w-md mx-auto">
-                  <strong>Step 1:</strong> Make sure the exam has been submitted by candidates (answers saved via Celery).<br />
-                  <strong>Step 2:</strong> Click <strong>⚡ Compute Results</strong> — this queues a Celery task.<br />
-                  <strong>Step 3:</strong> Wait ~10–30 seconds, then click <strong>🔄 Refresh</strong>.
-                </p>
-                <p className="text-xs text-gray-400 mt-2">
-                  Requires: Celery worker running with <code>-Q mysql_writes,default</code>
+                  <strong>Step 1:</strong> Make sure at least one candidate has submitted the exam.<br />
+                  <strong>Step 2:</strong> Click <strong>⚡ Compute Results</strong> — runs instantly, no Celery needed.<br />
+                  <strong>Step 3:</strong> Results appear automatically. Use <strong>🔄 Refresh</strong> to re-fetch.
                 </p>
               </div>
             ) : (
@@ -849,48 +913,72 @@ export default function AdminDashboard() {
       {tab === 'control' && (
         <div className="flex-1 p-4 grid grid-cols-1 md:grid-cols-2 gap-4 content-start">
 
+          {/* Active Exam Status Banner */}
+          {activeExam && (
+            <div className="md:col-span-2">
+              <div className={clsx(
+                'rounded-2xl border px-6 py-4 flex items-center gap-4',
+                activeExam.status === 'active'    ? 'bg-green-50 border-green-200' :
+                activeExam.status === 'paused'    ? 'bg-amber-50 border-amber-200' :
+                activeExam.status === 'completed' ? 'bg-gray-50 border-gray-200' :
+                                                    'bg-blue-50 border-blue-200'
+              )}>
+                <div className={clsx(
+                  'w-3 h-3 rounded-full flex-shrink-0',
+                  activeExam.status === 'active'    ? 'bg-green-500 animate-pulse' :
+                  activeExam.status === 'paused'    ? 'bg-amber-400' :
+                  activeExam.status === 'completed' ? 'bg-gray-400' : 'bg-blue-400'
+                )} />
+                <div className="flex-1 min-w-0">
+                  <p className="font-bold text-sm text-gray-800">
+                    #{activeExam.id} — {activeExam.title}
+                    <span className={clsx(
+                      'ml-2 text-xs font-semibold px-2 py-0.5 rounded-full',
+                      activeExam.status === 'active'    ? 'bg-green-100 text-green-700' :
+                      activeExam.status === 'paused'    ? 'bg-amber-100 text-amber-700' :
+                      activeExam.status === 'completed' ? 'bg-gray-100 text-gray-600' :
+                                                          'bg-blue-100 text-blue-700'
+                    )}>
+                      {activeExam.status?.toUpperCase()}
+                    </span>
+                  </p>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    {activeExam.status === 'active' && activeExam.end_time && (
+                      <>Ends {fmtIST(activeExam.end_time)} · {activeExam.total_questions} questions · {activeExam.duration_minutes} min</>
+                    )}
+                    {activeExam.status === 'completed' && 'Exam has ended'}
+                    {activeExam.status === 'draft' && 'Exam not started yet'}
+                  </p>
+                </div>
+                {activeExam.status === 'active' && activeExam.end_time && (
+                  <ExamCountdownBadge endTime={activeExam.end_time} />
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Start / Status */}
           <div className="bg-white rounded-2xl border border-exam-border p-6">
             <h2 className="font-bold text-exam-text mb-1">Exam Lifecycle</h2>
-            <p className="text-sm text-exam-muted mb-5">
-              Start the exam once all candidates are ready. This broadcasts to every connected client.
-            </p>
-            <button
-              onClick={handleStartExam}
-              className="w-full py-3 bg-green-600 text-white rounded-xl font-semibold text-sm
-                         hover:bg-green-700 transition-colors"
-            >
-              🚀 Start Exam Now
-            </button>
-          </div>
-
-          {/* Time controls */}
-          <div className="bg-white rounded-2xl border border-exam-border p-6">
-            <h2 className="font-bold text-exam-text mb-1">Time Controls</h2>
-            <p className="text-sm text-exam-muted mb-5">
-              Adjust the running exam — broadcasts to all candidates in real time.
+            <p className="text-sm text-exam-muted mb-4">
+              Start the exam to begin the 15-minute candidate countdown, then questions appear.
             </p>
             <div className="flex flex-col gap-3">
               <button
-                onClick={() => handleControl('extend', 'Add 15 minutes to the exam?')}
-                className="w-full py-2.5 bg-blue-50 text-blue-700 border border-blue-200 rounded-xl
-                           font-medium text-sm hover:bg-blue-100 transition-colors"
+                onClick={handleStartExam}
+                disabled={activeExam?.status === 'active' || activeExam?.status === 'completed'}
+                className="w-full py-3 bg-green-600 text-white rounded-xl font-semibold text-sm
+                           hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
               >
-                +15 min — Extend Time
+                🚀 Start Exam Now
               </button>
               <button
-                onClick={() => handleControl('pause', 'Pause the exam for all candidates?')}
-                className="w-full py-2.5 bg-amber-50 text-amber-700 border border-amber-200 rounded-xl
-                           font-medium text-sm hover:bg-amber-100 transition-colors"
+                onClick={handleEndExam}
+                disabled={activeExam?.status !== 'active' && activeExam?.status !== 'paused'}
+                className="w-full py-3 bg-red-600 text-white rounded-xl font-semibold text-sm
+                           hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
               >
-                ⏸ Pause Exam
-              </button>
-              <button
-                onClick={() => handleControl('resume', 'Resume the exam for all candidates?')}
-                className="w-full py-2.5 bg-green-50 text-green-700 border border-green-200 rounded-xl
-                           font-medium text-sm hover:bg-green-100 transition-colors"
-              >
-                ▶ Resume Exam
+                ⏹ End Exam Now
               </button>
             </div>
           </div>

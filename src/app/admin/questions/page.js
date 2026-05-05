@@ -13,12 +13,16 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
+import Link from 'next/link'
 import 'katex/dist/katex.min.css'
 import MathRenderer from '@/components/admin/MathRenderer'
 import {
   listExams, createExam,
   listQuestions, createQuestion, updateQuestion, deleteQuestion,
   uploadQuestionImage,
+  uploadExamPdf, getExtractionProgress, listExtractions, retryExtraction,
+  goLiveQuestions, deleteExtraction,
+  getAdminRole,
 } from '@/lib/api/adminClient'
 
 // ── Subject options ──────────────────────────────────────────────────────────
@@ -883,15 +887,523 @@ function CreateExamModal({ onCreated, onClose }) {
 
 
 // ═══════════════════════════════════════════════════════════════════════════
+//  UPLOAD EXAM PDF MODAL — AI question extraction
+// ═══════════════════════════════════════════════════════════════════════════
+function UploadPdfModal({ onClose, onFinishedExtraction }) {
+  const [file, setFile]               = useState(null)
+  const [title, setTitle]             = useState('')
+  const [expected, setExpected]       = useState(100)
+  const [uploading, setUploading]     = useState(false)
+  const [uploadPercent, setUploadPct] = useState(0)
+  const [extractionId, setExtractionId] = useState(null)
+  const [progress, setProgress]       = useState(null)   // {status, progress_percent, ...}
+  const [error, setError]             = useState(null)
+  const pollRef = useRef(null)
+
+  function handleFile(e) {
+    const f = e.target.files?.[0]
+    if (!f) return
+    if (!f.name.toLowerCase().endsWith('.pdf')) {
+      setError('File must be a .pdf')
+      return
+    }
+    if (f.size > 50 * 1024 * 1024) {
+      setError('PDF exceeds 50MB limit')
+      return
+    }
+    setFile(f)
+    setError(null)
+    if (!title.trim()) setTitle(f.name.replace(/\.pdf$/i, ''))
+  }
+
+  async function startUpload() {
+    if (!file)         { setError('Choose a PDF first'); return }
+    if (!title.trim()) { setError('Title is required');  return }
+    setUploading(true)
+    setError(null)
+    setUploadPct(0)
+    console.log('[UploadPdfModal] Starting upload:', { file: file.name, size: file.size, title: title.trim(), expected })
+    try {
+      const { data } = await uploadExamPdf(file, title.trim(), expected, (e) => {
+        if (e.total) setUploadPct(Math.round((e.loaded / e.total) * 100))
+      })
+      console.log('[UploadPdfModal] Upload response from backend:', data)
+      setExtractionId(data.extraction_id)
+      setProgress({
+        status: data.status,
+        progress_percent: 0,
+        progress_message: data.message || 'Queued',
+        extracted_count: 0,
+        flagged_count: 0,
+        expected_questions: expected,
+      })
+    } catch (err) {
+      console.error('[UploadPdfModal] Upload FAILED:', err.response?.data || err.message, err)
+      setError(err.response?.data?.detail || err.message || 'Upload failed')
+      setUploading(false)
+    }
+  }
+
+  // Poll progress every 3s once we have an extraction_id
+  useEffect(() => {
+    if (!extractionId) return
+    console.log('[UploadPdfModal] Starting progress polling — extraction_id:', extractionId)
+    let stop = false
+    let pollCount = 0
+    async function tick() {
+      pollCount++
+      try {
+        const { data } = await getExtractionProgress(extractionId)
+        if (stop) return
+        console.log(`[UploadPdfModal] Poll #${pollCount} — extraction_id=${extractionId}`, {
+          status: data.status,
+          progress_percent: data.progress_percent,
+          progress_message: data.progress_message,
+          extracted_count: data.extracted_count,
+          flagged_count: data.flagged_count,
+          error_message: data.error_message,
+        })
+        setProgress(data)
+        if (data.status === 'pending_review' || data.status === 'finalized') {
+          console.log('[UploadPdfModal] Extraction COMPLETE — stopping poll. Status:', data.status)
+          if (pollRef.current) clearInterval(pollRef.current)
+          onFinishedExtraction?.(extractionId)
+        } else if (data.status === 'failed') {
+          console.error('[UploadPdfModal] Extraction FAILED — stopping poll. Error:', data.error_message)
+          if (pollRef.current) clearInterval(pollRef.current)
+          setError(data.error_message || 'Extraction failed')
+        } else if (data.progress_message?.includes('No Celery worker')) {
+          console.warn('[UploadPdfModal] WARNING: No Celery worker running!', data.progress_message)
+        }
+      } catch (err) {
+        console.error(`[UploadPdfModal] Poll #${pollCount} HTTP error:`, err.message, err)
+        if (!stop) setError(err.message)
+      }
+    }
+    tick()
+    pollRef.current = setInterval(tick, 3000)
+    return () => { stop = true; if (pollRef.current) clearInterval(pollRef.current) }
+  }, [extractionId])  // eslint-disable-line
+
+  const isDone       = progress?.status === 'pending_review' || progress?.status === 'finalized'
+  const isFailed     = progress?.status === 'failed' || !!error
+  const isRunning    = !!extractionId && !isDone && !isFailed
+  const noWorker     = progress?.progress_message?.includes('No Celery worker')
+  // "stuck" = queued or uploaded with 0% after upload finished
+  const isStuck      = isRunning && (progress?.status === 'uploaded') && !uploading
+  const [retrying, setRetrying] = useState(false)
+
+  async function handleRetry() {
+    if (!extractionId) return
+    setRetrying(true)
+    setError(null)
+    try {
+      const { data } = await retryExtraction(extractionId)
+      setProgress(data)
+      // Restart polling
+      if (pollRef.current) clearInterval(pollRef.current)
+    } catch (e) {
+      setError(e.response?.data?.detail || 'Retry failed')
+    } finally {
+      setRetrying(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+      <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-xl">
+        <div className="flex items-center justify-between mb-6">
+          <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2">
+            <span>📄</span> Upload Exam PDF — AI Extraction
+          </h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-2xl leading-none">×</button>
+        </div>
+
+        {!extractionId && (
+          <div className="space-y-4">
+            <p className="text-sm text-gray-500">
+              Upload a question paper PDF. The system will use AWS Textract + Gemini Vision
+              to extract questions, options and the answer key, then send them to the review queue.
+            </p>
+
+            <div>
+              <label className="label-sm">PDF File *</label>
+              <label className={`flex items-center justify-center gap-2 px-4 py-6 border-2 border-dashed rounded-xl cursor-pointer transition-colors ${
+                file ? 'border-green-300 bg-green-50' : 'border-gray-300 hover:border-indigo-400 hover:bg-indigo-50'
+              }`}>
+                <span className="text-2xl">{file ? '✅' : '⬆️'}</span>
+                <span className="text-sm">
+                  {file
+                    ? <><span className="font-semibold text-green-700">{file.name}</span> <span className="text-gray-500">({(file.size / 1024 / 1024).toFixed(1)} MB)</span></>
+                    : <>Click to choose a PDF (max 50 MB)</>
+                  }
+                </span>
+                <input type="file" accept="application/pdf" className="hidden" onChange={handleFile} />
+              </label>
+            </div>
+
+            <div>
+              <label className="label-sm">Exam Title *</label>
+              <input
+                value={title}
+                onChange={e => setTitle(e.target.value)}
+                placeholder="e.g. DAT 2026 — Mock 1"
+                className="input-sm"
+              />
+            </div>
+
+            <div>
+              <label className="label-sm">Expected Question Count</label>
+              <input
+                type="number" min="1" max="500"
+                value={expected}
+                onChange={e => setExpected(parseInt(e.target.value) || 100)}
+                className="input-sm"
+              />
+            </div>
+
+            {error && <p className="text-red-600 text-sm bg-red-50 border border-red-200 px-3 py-2 rounded-lg">{error}</p>}
+
+            <div className="flex justify-end gap-3 pt-2">
+              <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600 hover:text-gray-900">Cancel</button>
+              <button
+                onClick={startUpload}
+                disabled={uploading || !file}
+                className="px-6 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg shadow disabled:opacity-60"
+              >
+                {uploading ? `Uploading ${uploadPercent}%…` : 'Upload & Extract'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {extractionId && (
+          <div className="space-y-4">
+            <div className="bg-gray-50 border border-gray-200 rounded-xl p-4">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs uppercase tracking-wide text-gray-500 font-semibold">
+                  Extraction #{extractionId}
+                </p>
+                <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
+                  isFailed ? 'bg-red-100 text-red-700' :
+                  isDone   ? 'bg-green-100 text-green-700' :
+                             'bg-blue-100 text-blue-700'
+                }`}>
+                  {(progress?.status || 'processing').toUpperCase()}
+                </span>
+              </div>
+
+              <div className="w-full bg-gray-200 rounded-full h-3 overflow-hidden">
+                <div
+                  className={`h-3 transition-all duration-500 ${
+                    isFailed ? 'bg-red-500' : isDone ? 'bg-green-500' : 'bg-indigo-500'
+                  }`}
+                  style={{ width: `${progress?.progress_percent || 0}%` }}
+                />
+              </div>
+
+              <p className="text-sm text-gray-700 mt-3">
+                {progress?.progress_message || 'Waiting for worker…'}
+              </p>
+
+              {/* No-worker warning */}
+              {noWorker && (
+                <div className="mt-3 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-800">
+                  <p className="font-bold mb-1">⚠ Celery worker not detected</p>
+                  <p className="font-mono bg-amber-100 px-2 py-1 rounded select-all">
+                    celery -A api.tasks.workers.celery_app worker -Q mysql_writes,default --loglevel=info --pool=solo
+                  </p>
+                  <p className="mt-1 text-amber-600">Run the command above in your backend terminal, then click Retry below.</p>
+                </div>
+              )}
+
+              {/* Retry button — shown when stuck at 0% */}
+              {isStuck && (
+                <div className="mt-3 flex items-center gap-3">
+                  <button
+                    onClick={handleRetry}
+                    disabled={retrying}
+                    className="flex items-center gap-1.5 px-4 py-2 text-sm font-semibold bg-orange-500 hover:bg-orange-600 text-white rounded-lg disabled:opacity-50 transition-colors"
+                  >
+                    {retrying ? (
+                      <><span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin inline-block" /> Retrying…</>
+                    ) : (
+                      <>↺ Retry Extraction</>
+                    )}
+                  </button>
+                  <span className="text-xs text-gray-400">Task may be stuck — retry re-queues it</span>
+                </div>
+              )}
+
+              <div className="grid grid-cols-3 gap-3 mt-4 text-center">
+                <div className="bg-white rounded-lg p-2 border border-gray-100">
+                  <p className="text-xs text-gray-500">Extracted</p>
+                  <p className="text-lg font-bold text-gray-800">{progress?.extracted_count ?? 0}</p>
+                </div>
+                <div className="bg-white rounded-lg p-2 border border-gray-100">
+                  <p className="text-xs text-gray-500">Flagged</p>
+                  <p className="text-lg font-bold text-amber-600">{progress?.flagged_count ?? 0}</p>
+                </div>
+                <div className="bg-white rounded-lg p-2 border border-gray-100">
+                  <p className="text-xs text-gray-500">Expected</p>
+                  <p className="text-lg font-bold text-gray-400">{progress?.expected_questions ?? expected}</p>
+                </div>
+              </div>
+            </div>
+
+            {error && <p className="text-red-600 text-sm bg-red-50 border border-red-200 px-3 py-2 rounded-lg">{error}</p>}
+
+            {isRunning && (
+              <p className="text-xs text-gray-400 italic text-center">
+                Extraction usually takes 2–5 minutes. You can close this dialog —
+                progress is saved server-side and visible in the extractions list.
+              </p>
+            )}
+
+            <div className="flex justify-end gap-3 pt-2">
+              <button onClick={onClose}
+                className="px-5 py-2 text-sm text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50">
+                {isDone ? 'Done' : 'Close (keep running)'}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  GO LIVE MODAL
+// ═══════════════════════════════════════════════════════════════════════════
+function GoLiveModal({ extraction, exams, onClose, onSuccess }) {
+  const [targetExamId,    setTargetExamId]    = useState(exams[0]?.id ?? '')
+  const [replaceExisting, setReplaceExisting] = useState(true)
+  const [loading,         setLoading]         = useState(false)
+  const [error,           setError]           = useState(null)
+  const [success,         setSuccess]         = useState(null)
+
+  const noExams = exams.length === 0
+
+  async function handleGoLive() {
+    if (!targetExamId) { setError('Select an exam first'); return }
+    setLoading(true)
+    setError(null)
+    try {
+      const { data } = await goLiveQuestions(targetExamId, extraction.id, replaceExisting)
+      const count = data.questions_published ?? data.published ?? '?'
+      setSuccess(`${count} questions published successfully!`)
+      setTimeout(() => onSuccess(), 1800)
+    } catch (e) {
+      setError(e.response?.data?.detail || e.message || 'Go Live failed')
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden">
+        {/* Header */}
+        <div className="bg-gradient-to-r from-emerald-500 to-teal-600 px-8 py-6">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <span className="text-3xl">🚀</span>
+              <div>
+                <h2 className="text-xl font-bold text-white">Publish to Exam</h2>
+                <p className="text-emerald-100 text-sm">Make this paper live for candidates</p>
+              </div>
+            </div>
+            <button onClick={onClose} className="text-white/70 hover:text-white text-2xl leading-none">×</button>
+          </div>
+        </div>
+
+        <div className="p-8">
+          {/* Extraction info */}
+          <div className="bg-gray-50 rounded-2xl p-4 mb-6 border border-gray-100">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-emerald-100 flex items-center justify-center text-lg">📄</div>
+              <div>
+                <p className="font-semibold text-gray-800 text-sm">#{extraction.id} — {extraction.title}</p>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  <span className="text-emerald-600 font-medium">{extraction.extracted_count} questions</span> ready to publish
+                  {extraction.flagged_count > 0 && (
+                    <span className="text-amber-500 ml-2">· {extraction.flagged_count} flagged for review</span>
+                  )}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {noExams ? (
+            <div className="text-center py-6">
+              <p className="text-4xl mb-3">🏫</p>
+              <p className="text-gray-700 font-semibold text-base mb-2">No exams exist yet</p>
+              <p className="text-gray-500 text-sm mb-5">
+                You need to create an exam before you can publish questions to it.
+                Close this dialog and click <strong>+ New Exam</strong> in the toolbar above.
+              </p>
+              <button
+                onClick={onClose}
+                className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-xl"
+              >
+                Go Create an Exam First
+              </button>
+            </div>
+          ) : success ? (
+            <div className="text-center py-8">
+              <p className="text-5xl mb-3">✅</p>
+              <p className="text-emerald-700 font-bold text-lg">{success}</p>
+              <p className="text-gray-400 text-sm mt-1">Closing…</p>
+            </div>
+          ) : (
+            <div className="space-y-5">
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">Target Exam *</label>
+                <select
+                  value={targetExamId}
+                  onChange={e => setTargetExamId(Number(e.target.value))}
+                  className="w-full border-2 border-gray-200 rounded-xl px-4 py-3 text-sm font-medium text-gray-800 focus:ring-2 focus:ring-emerald-400 focus:border-emerald-400 outline-none bg-white"
+                >
+                  {exams.map(ex => (
+                    <option key={ex.id} value={ex.id}>
+                      #{ex.id} — {ex.title}  ({ex.status?.toUpperCase()})
+                    </option>
+                  ))}
+                </select>
+                {exams.find(e => e.id === targetExamId) && (
+                  <p className="text-xs text-gray-400 mt-1.5 pl-1">
+                    Currently has {exams.find(e => e.id === targetExamId)?.question_count ?? 0} questions
+                    · status: <span className="font-medium">{exams.find(e => e.id === targetExamId)?.status}</span>
+                  </p>
+                )}
+              </div>
+
+              <label className="flex items-start gap-3 cursor-pointer bg-amber-50 border border-amber-200 rounded-xl p-4">
+                <input
+                  type="checkbox"
+                  checked={replaceExisting}
+                  onChange={e => setReplaceExisting(e.target.checked)}
+                  className="mt-0.5 w-4 h-4 accent-emerald-600"
+                />
+                <span className="text-sm text-gray-700">
+                  <span className="font-semibold">Replace existing questions</span>
+                  <span className="block text-xs text-gray-500 mt-0.5">
+                    {replaceExisting
+                      ? '⚠️ All current questions in the target exam will be removed and replaced.'
+                      : '➕ Extracted questions will be appended without removing existing ones.'}
+                  </span>
+                </span>
+              </label>
+
+              {error && (
+                <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-sm text-red-700">
+                  ⚠️ {error}
+                </div>
+              )}
+
+              <div className="flex gap-3 pt-2">
+                <button
+                  onClick={onClose}
+                  className="flex-1 px-4 py-3 border-2 border-gray-200 rounded-xl text-sm font-semibold text-gray-600 hover:bg-gray-50 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleGoLive}
+                  disabled={loading}
+                  className="flex-1 px-4 py-3 bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 disabled:opacity-50 text-white text-sm font-bold rounded-xl flex items-center justify-center gap-2 shadow-lg shadow-emerald-200 transition-all"
+                >
+                  {loading ? <span className="animate-spin text-lg">⏳</span> : <span>🚀</span>}
+                  {loading ? 'Publishing…' : `Publish ${extraction.extracted_count} Questions`}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  DELETE EXTRACTION MODAL
+// ═══════════════════════════════════════════════════════════════════════════
+function DeleteExtractionModal({ extraction, onClose, onDeleted }) {
+  const [loading, setLoading] = useState(false)
+  const [error,   setError]   = useState(null)
+
+  async function handleDelete() {
+    setLoading(true)
+    setError(null)
+    try {
+      await deleteExtraction(extraction.id)
+      onDeleted()
+    } catch (e) {
+      setError(e.response?.data?.detail || e.message || 'Delete failed')
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md overflow-hidden">
+        <div className="bg-gradient-to-r from-red-500 to-rose-600 px-8 py-6 text-center">
+          <p className="text-5xl mb-2">🗑️</p>
+          <h2 className="text-xl font-bold text-white">Delete Extraction?</h2>
+          <p className="text-red-100 text-sm mt-1">This action is permanent and cannot be undone</p>
+        </div>
+        <div className="p-8 text-center">
+          <div className="bg-slate-50 rounded-2xl p-4 mb-6 border border-slate-100">
+            <p className="font-semibold text-slate-800">#{extraction.id} — {extraction.title}</p>
+            <p className="text-sm text-slate-500 mt-1">
+              {extraction.extracted_count || 0} extracted questions will be permanently removed
+            </p>
+          </div>
+          {error && (
+            <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-sm text-red-700 mb-4">
+              ⚠️ {error}
+            </div>
+          )}
+          <div className="flex gap-3">
+            <button
+              onClick={onClose}
+              className="flex-1 px-4 py-3 border-2 border-slate-200 rounded-xl text-sm font-semibold text-slate-600 hover:bg-slate-50 transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleDelete}
+              disabled={loading}
+              className="flex-1 px-4 py-3 bg-gradient-to-r from-red-500 to-rose-600 hover:from-red-600 hover:to-rose-700 disabled:opacity-50 text-white text-sm font-bold rounded-xl shadow-lg shadow-red-200 transition-all"
+            >
+              {loading ? 'Deleting…' : 'Yes, Delete Forever'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 //  MAIN PAGE
 // ═══════════════════════════════════════════════════════════════════════════
 export default function QuestionsPage() {
   const router = useRouter()
 
-  // Auth guard
+  // Auth guard (question_manager only)
   useEffect(() => {
-    if (typeof window !== 'undefined' && !localStorage.getItem('rgipt-admin-token')) {
+    if (typeof window === 'undefined') return
+    const token = localStorage.getItem('rgipt-admin-token')
+    const role  = getAdminRole()
+    if (!token) {
       router.replace('/admin/login')
+      return
+    }
+    // exam_controller should be on /admin (monitoring), not here
+    if (role && role !== 'question_manager') {
+      router.replace('/admin')
     }
   }, [router])
 
@@ -902,7 +1414,11 @@ export default function QuestionsPage() {
   const [editing,      setEditing]      = useState(null)       // question object or null
   const [showEditor,   setShowEditor]   = useState(false)
   const [showNewExam,  setShowNewExam]  = useState(false)
+  const [showUpload,   setShowUpload]   = useState(false)
+  const [extractions,  setExtractions]  = useState([])
   const [deleteConfirm, setDeleteConfirm] = useState(null)     // question id to confirm
+  const [goLiveEx,     setGoLiveEx]     = useState(null)       // extraction to go-live
+  const [delExConfirm, setDelExConfirm] = useState(null)       // extraction to delete
   const [search,       setSearch]       = useState('')
   const [filterSubj,   setFilterSubj]   = useState('All')
 
@@ -914,7 +1430,13 @@ export default function QuestionsPage() {
         if (data.length > 0) setSelectedExam(data[0])
       })
       .catch(console.error)
+    // Also load any in-flight or recent extractions so admin can see status
+    listExtractions().then(({ data }) => setExtractions(data || [])).catch(() => {})
   }, [])
+
+  function refreshExtractions() {
+    listExtractions().then(({ data }) => setExtractions(data || [])).catch(() => {})
+  }
 
   // Load questions when exam changes
   useEffect(() => {
@@ -955,35 +1477,77 @@ export default function QuestionsPage() {
     : 1
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-slate-50">
 
-      {/* ── Top navbar ── */}
-      <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center gap-4">
-        <button onClick={() => router.push('/admin')} className="text-gray-500 hover:text-gray-900 text-sm flex items-center gap-1">
-          ← Back to Dashboard
-        </button>
-        <span className="text-gray-300">|</span>
-        <h1 className="text-xl font-bold text-gray-900">📚 Question Bank</h1>
+      {/* ── Header ── */}
+      <div className="bg-white border-b border-slate-200 shadow-sm">
+        <div className="max-w-screen-2xl mx-auto px-8 py-5 flex items-center gap-5">
+          <button
+            onClick={() => router.push('/admin')}
+            className="flex items-center gap-2 text-slate-500 hover:text-slate-900 text-sm font-medium transition-colors group"
+          >
+            <span className="text-lg group-hover:-translate-x-0.5 transition-transform">←</span>
+            Dashboard
+          </button>
+          <div className="w-px h-6 bg-slate-200" />
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-indigo-600 flex items-center justify-center text-lg">📚</div>
+            <div>
+              <h1 className="text-lg font-bold text-slate-900 leading-tight">Question Bank</h1>
+              <p className="text-xs text-slate-400">Manage exam questions &amp; papers</p>
+            </div>
+          </div>
+
+          <div className="ml-auto" style={{display:'flex', alignItems:'center', gap:'12px'}}>
+            <button
+              type="button"
+              onClick={() => setShowUpload(true)}
+              style={{display:'inline-flex', alignItems:'center', gap:'8px', padding:'10px 20px', background:'#4f46e5', color:'#fff', fontSize:'14px', fontWeight:600, borderRadius:'12px', border:'none', cursor:'pointer', whiteSpace:'nowrap'}}
+            >
+              📄 Upload PDF &amp; Extract
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowNewExam(true)}
+              style={{display:'inline-flex', alignItems:'center', gap:'8px', padding:'10px 20px', background:'#eef2ff', color:'#4338ca', fontSize:'14px', fontWeight:600, borderRadius:'12px', border:'2px solid #c7d2fe', cursor:'pointer', whiteSpace:'nowrap'}}
+            >
+              + New Exam
+            </button>
+            <div style={{width:'1px', height:'24px', background:'#e2e8f0'}} />
+            <button
+              type="button"
+              onClick={() => {
+                localStorage.removeItem('rgipt-admin-token')
+                localStorage.removeItem('rgipt-admin-email')
+                localStorage.removeItem('rgipt-admin-role')
+                router.push('/admin/login')
+              }}
+              style={{display:'inline-flex', alignItems:'center', gap:'6px', padding:'8px 16px', background:'#fff', color:'#64748b', fontSize:'13px', fontWeight:600, borderRadius:'10px', border:'1px solid #e2e8f0', cursor:'pointer', whiteSpace:'nowrap'}}
+            >
+              Logout
+            </button>
+          </div>
+        </div>
       </div>
 
-      <div className="max-w-7xl mx-auto px-6 py-6">
+      <div className="max-w-screen-2xl mx-auto px-8 py-8 space-y-8">
 
-        {/* ── Exam selector ── */}
-        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5 mb-6">
-          <div className="flex flex-wrap items-center gap-4">
-            <div className="flex items-center gap-2 flex-1 min-w-0">
-              <label className="text-sm font-semibold text-gray-700 flex-shrink-0">Exam:</label>
+        {/* ── Exam selector card ── */}
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
+          <div className="flex flex-wrap items-center gap-5">
+            <div className="flex-1 min-w-[240px]">
+              <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Active Exam</label>
               <select
                 value={selectedExam?.id || ''}
                 onChange={e => {
                   const exam = exams.find(ex => ex.id === parseInt(e.target.value))
                   setSelectedExam(exam || null)
                 }}
-                className="flex-1 min-w-0 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                className="w-full border-2 border-slate-200 rounded-xl px-4 py-3 text-base font-medium text-slate-800 focus:ring-2 focus:ring-indigo-400 focus:border-indigo-400 outline-none bg-white"
               >
                 {exams.map(ex => (
                   <option key={ex.id} value={ex.id}>
-                    {ex.title} ({ex.question_count}/{ex.total_questions} questions) — {ex.status}
+                    #{ex.id} — {ex.title}  ({ex.question_count ?? 0}/{ex.total_questions ?? '?'} Q) · {ex.status}
                   </option>
                 ))}
                 {exams.length === 0 && <option value="">No exams yet — create one</option>}
@@ -991,170 +1555,314 @@ export default function QuestionsPage() {
             </div>
 
             {selectedExam && (
-              <div className="flex items-center gap-3 text-sm text-gray-600 flex-shrink-0">
-                <span className="bg-gray-100 px-2 py-1 rounded">
-                  ⏱ {selectedExam.duration_minutes} min
-                </span>
-                <span className="bg-green-50 text-green-700 px-2 py-1 rounded">
-                  +{selectedExam.positive_marks} / −{selectedExam.negative_marks}
-                </span>
-                <span className={`px-2 py-1 rounded font-medium ${
-                  selectedExam.status === 'active'    ? 'bg-green-100 text-green-700' :
-                  selectedExam.status === 'draft'     ? 'bg-yellow-100 text-yellow-700' :
-                  selectedExam.status === 'completed' ? 'bg-gray-100 text-gray-600' :
-                  'bg-blue-100 text-blue-700'
+              <div className="flex items-center gap-3 flex-wrap">
+                <div className="bg-slate-100 rounded-xl px-4 py-3 text-center min-w-[80px]">
+                  <p className="text-xs text-slate-500 font-medium">Duration</p>
+                  <p className="text-base font-bold text-slate-800">⏱ {selectedExam.duration_minutes}m</p>
+                </div>
+                <div className="bg-green-50 border border-green-200 rounded-xl px-4 py-3 text-center min-w-[90px]">
+                  <p className="text-xs text-green-600 font-medium">Marks</p>
+                  <p className="text-base font-bold text-green-700">+{selectedExam.positive_marks} / −{selectedExam.negative_marks}</p>
+                </div>
+                <div className={`rounded-xl px-4 py-3 text-center min-w-[80px] ${
+                  selectedExam.status === 'active'    ? 'bg-green-100 border border-green-200' :
+                  selectedExam.status === 'draft'     ? 'bg-yellow-50 border border-yellow-200' :
+                  selectedExam.status === 'completed' ? 'bg-slate-100 border border-slate-200' :
+                  'bg-blue-50 border border-blue-200'
                 }`}>
-                  {selectedExam.status?.toUpperCase()}
-                </span>
+                  <p className="text-xs text-slate-500 font-medium">Status</p>
+                  <p className={`text-sm font-bold ${
+                    selectedExam.status === 'active'    ? 'text-green-700' :
+                    selectedExam.status === 'draft'     ? 'text-yellow-700' :
+                    selectedExam.status === 'completed' ? 'text-slate-600' :
+                    'text-blue-700'
+                  }`}>{selectedExam.status?.toUpperCase()}</p>
+                </div>
               </div>
             )}
-
-            <button
-              onClick={() => setShowNewExam(true)}
-              className="flex-shrink-0 px-4 py-2 border-2 border-dashed border-indigo-300 text-indigo-600 text-sm font-medium rounded-lg hover:bg-indigo-50 transition-colors"
-            >
-              + New Exam
-            </button>
           </div>
         </div>
 
-        {/* ── Toolbar ── */}
-        {selectedExam && (
-          <div className="flex flex-wrap items-center gap-3 mb-4">
-            <button
-              onClick={() => { setEditing({ ...BLANK_FORM, sequence_number: nextSeq }); setShowEditor(true) }}
-              className="flex items-center gap-2 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-xl shadow transition-colors"
-            >
-              + Add Question
-            </button>
+        {/* ── PDF Extractions section ── */}
+        {extractions.length > 0 && (
+          <div>
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-base font-bold text-slate-700 flex items-center gap-2">
+                <span className="w-6 h-6 rounded-md bg-emerald-100 flex items-center justify-center text-sm">📄</span>
+                PDF Extractions
+              </h2>
+              <span className="text-xs text-slate-400">{extractions.length} total</span>
+            </div>
+            <div className="grid grid-cols-1 gap-4">
+              {extractions.slice(0, 6).map(ex => {
+                const isStuck  = (ex.status === 'uploaded' || ex.status === 'failed')
+                const isActive = ex.status === 'processing'
+                const isDone   = ex.status === 'pending_review' || ex.status === 'finalized'
+                const pct      = ex.progress_percent || 0
 
-            <input
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              placeholder="Search questions…"
-              className="border border-gray-300 rounded-lg px-3 py-2 text-sm w-56 focus:ring-2 focus:ring-indigo-400 outline-none"
-            />
+                const borderColor =
+                  ex.status === 'failed'         ? 'border-l-red-500' :
+                  ex.status === 'pending_review' ? 'border-l-emerald-500' :
+                  ex.status === 'finalized'      ? 'border-l-slate-400' :
+                  ex.status === 'processing'     ? 'border-l-blue-500' :
+                                                    'border-l-yellow-400'
+                const badgeClass =
+                  ex.status === 'failed'         ? 'bg-red-100 text-red-700' :
+                  ex.status === 'pending_review' ? 'bg-emerald-100 text-emerald-700' :
+                  ex.status === 'finalized'      ? 'bg-slate-100 text-slate-600' :
+                  ex.status === 'processing'     ? 'bg-blue-100 text-blue-700' :
+                                                    'bg-yellow-100 text-yellow-700'
 
-            <select
-              value={filterSubj}
-              onChange={e => setFilterSubj(e.target.value)}
-              className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-400 outline-none"
-            >
-              {usedSubjects.map(s => <option key={s}>{s}</option>)}
-            </select>
+                // left-border accent color (inline style to avoid Tailwind purge conflict with border-l-4)
+                const accentColor =
+                  ex.status === 'failed'         ? '#ef4444' :
+                  ex.status === 'pending_review' ? '#10b981' :
+                  ex.status === 'finalized'      ? '#94a3b8' :
+                  ex.status === 'processing'     ? '#3b82f6' :
+                                                    '#f59e0b'
 
-            <span className="ml-auto text-sm text-gray-500">
-              {filtered.length} of {questions.length} questions
-            </span>
-          </div>
-        )}
-
-        {/* ── Question list ── */}
-        {selectedExam && (
-          <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-            {loading ? (
-              <div className="flex items-center justify-center py-20 text-gray-400">
-                <span className="animate-spin mr-3 text-2xl">⟳</span> Loading questions…
-              </div>
-            ) : filtered.length === 0 ? (
-              <div className="text-center py-20">
-                <p className="text-5xl mb-3">📝</p>
-                <p className="text-gray-500 text-lg font-medium">
-                  {questions.length === 0 ? 'No questions yet' : 'No questions match your filter'}
-                </p>
-                {questions.length === 0 && (
-                  <button
-                    onClick={() => { setEditing({ ...BLANK_FORM, sequence_number: 1 }); setShowEditor(true) }}
-                    className="mt-4 px-5 py-2.5 bg-indigo-600 text-white text-sm font-semibold rounded-xl hover:bg-indigo-700"
+                return (
+                  <div key={ex.id}
+                    style={{borderLeft: `4px solid ${accentColor}`}}
+                    className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 hover:shadow-md transition-shadow"
                   >
-                    Add First Question
-                  </button>
-                )}
-              </div>
-            ) : (
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="bg-gray-50 border-b border-gray-200 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">
-                    <th className="px-4 py-3 w-12">#</th>
-                    <th className="px-4 py-3 w-24">Subject</th>
-                    <th className="px-4 py-3 w-28">Type</th>
-                    <th className="px-4 py-3">Question</th>
-                    <th className="px-4 py-3 w-20 text-center">Marks</th>
-                    <th className="px-4 py-3 w-20 text-center">Answer</th>
-                    <th className="px-4 py-3 w-24 text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {filtered.map(q => (
-                    <tr key={q.id} className="hover:bg-gray-50 transition-colors">
-                      <td className="px-4 py-3 font-bold text-gray-400">{q.sequence_number}</td>
-                      <td className="px-4 py-3">
-                        <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${SUBJECT_COLORS[q.subject] || 'bg-gray-100 text-gray-700'}`}>
-                          {q.subject}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3">
-                        <span className={`text-xs px-2 py-0.5 rounded ${TYPE_COLORS[q.question_type] || ''}`}>
-                          {q.question_type === 'single_mcq' ? 'MCQ' :
-                           q.question_type === 'multi_mcq'  ? 'Multi' : 'Numerical'}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 max-w-0">
-                        <div className="truncate text-gray-800 font-serif leading-snug">
-                          <MathRenderer text={q.text?.slice(0, 120) + (q.text?.length > 120 ? '…' : '')} />
-                        </div>
-                        <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-                          {q.image_url && (
-                            <span className="inline-flex items-center gap-1 text-xs text-blue-500">
-                              📷 question image
-                            </span>
+                    <div className="flex items-center gap-4">
+                      {/* Left: info */}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-3 mb-2 flex-wrap">
+                          <span className="text-xs font-mono text-slate-400 bg-slate-100 px-2 py-0.5 rounded-md">#{ex.id}</span>
+                          <span className="font-semibold text-slate-800 text-base truncate">{ex.title}</span>
+                          <span className={`text-xs font-bold px-2.5 py-1 rounded-full ${badgeClass}`}>
+                            {ex.status === 'uploaded' ? 'QUEUED' : ex.status.replace('_', ' ').toUpperCase()}
+                          </span>
+                          {isActive && (
+                            <span className="text-xs text-blue-500 font-semibold animate-pulse">{pct}%</span>
                           )}
-                          {q.option_images && Object.values(q.option_images).some(Boolean) && (
-                            <span className="inline-flex items-center gap-1 text-xs text-indigo-500">
-                              🖼 option diagrams
+                        </div>
+
+                        {/* Progress bar */}
+                        <div className="w-full bg-slate-100 rounded-full h-2 mb-3 overflow-hidden">
+                          <div
+                            className="h-2 rounded-full transition-all duration-700"
+                            style={{ width: `${pct}%`, background: accentColor }}
+                          />
+                        </div>
+
+                        <div className="flex items-center gap-4 text-sm text-slate-500 flex-wrap">
+                          <span>
+                            <span className="font-bold text-slate-700">{ex.extracted_count}</span>
+                            /{ex.expected_questions} questions extracted
+                          </span>
+                          {ex.flagged_count > 0 && (
+                            <span className="text-amber-600 font-medium">⚑ {ex.flagged_count} flagged</span>
+                          )}
+                          {(isStuck || isActive) && ex.progress_message && (
+                            <span className={`text-xs italic truncate max-w-xs ${ex.status === 'failed' ? 'text-red-500' : 'text-slate-400'}`}
+                              title={ex.progress_message}>
+                              {ex.progress_message}
                             </span>
                           )}
                         </div>
-                      </td>
-                      <td className="px-4 py-3 text-center">
-                        <span className="text-green-700 font-semibold">+{q.marks}</span>
-                        <span className="text-red-500 ml-1">−{q.negative_marks}</span>
-                      </td>
-                      <td className="px-4 py-3 text-center">
-                        <span className="inline-block w-7 h-7 rounded-full bg-green-100 text-green-800 text-xs font-bold flex items-center justify-center leading-none">
-                          {q.correct_answer}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        <div className="flex items-center justify-end gap-2">
+                      </div>
+
+                      {/* Right: actions — NO flex-wrap (caused click-zone offset) */}
+                      <div style={{display:'flex', alignItems:'center', gap:'8px', flexShrink:0}}>
+                        {isDone && (
+                          <Link
+                            href={`/admin/extractions/${ex.id}/review`}
+                            style={{display:'inline-flex', alignItems:'center', padding:'8px 14px', background:'#eef2ff', color:'#4338ca', fontSize:'13px', fontWeight:600, borderRadius:'10px', border:'1px solid #c7d2fe', textDecoration:'none', whiteSpace:'nowrap'}}
+                          >
+                            Review →
+                          </Link>
+                        )}
+                        {isDone && (
                           <button
-                            onClick={() => { setEditing(q); setShowEditor(true) }}
-                            className="text-indigo-500 hover:text-indigo-700 text-xs font-medium hover:underline"
-                          >Edit</button>
+                            type="button"
+                            onClick={() => setGoLiveEx(ex)}
+                            style={{display:'inline-flex', alignItems:'center', padding:'8px 14px', background:'#ecfdf5', color:'#065f46', fontSize:'13px', fontWeight:600, borderRadius:'10px', border:'1px solid #6ee7b7', cursor:'pointer', whiteSpace:'nowrap'}}
+                          >
+                            🚀 Go Live
+                          </button>
+                        )}
+                        {isStuck && (
                           <button
-                            onClick={() => setDeleteConfirm(q.id)}
-                            className="text-red-400 hover:text-red-600 text-xs font-medium hover:underline"
-                          >Delete</button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
+                            type="button"
+                            onClick={async () => {
+                              try { await retryExtraction(ex.id); refreshExtractions() }
+                              catch (e) { alert(e.response?.data?.detail || 'Retry failed') }
+                            }}
+                            style={{display:'inline-flex', alignItems:'center', padding:'8px 14px', background:'#fff7ed', color:'#9a3412', fontSize:'13px', fontWeight:600, borderRadius:'10px', border:'1px solid #fed7aa', cursor:'pointer', whiteSpace:'nowrap'}}
+                          >
+                            ↺ Retry
+                          </button>
+                        )}
+                        {ex.status !== 'processing' && (
+                          <button
+                            type="button"
+                            onClick={() => setDelExConfirm(ex)}
+                            title="Delete extraction"
+                            style={{display:'inline-flex', alignItems:'center', padding:'8px 12px', background:'#fef2f2', color:'#dc2626', fontSize:'16px', borderRadius:'10px', border:'1px solid #fecaca', cursor:'pointer'}}
+                          >
+                            🗑
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
           </div>
         )}
 
-        {/* Empty state when no exam selected */}
+        {/* ── Question list section ── */}
+        {selectedExam && (
+          <div>
+            {/* Toolbar */}
+            <div className="flex flex-wrap items-center gap-3 mb-4">
+              <h2 className="text-base font-bold text-slate-700 mr-2 flex items-center gap-2">
+                <span className="w-6 h-6 rounded-md bg-indigo-100 flex items-center justify-center text-sm">❓</span>
+                Questions
+              </h2>
+              <button
+                type="button"
+                onClick={() => { setEditing({ ...BLANK_FORM, sequence_number: nextSeq }); setShowEditor(true) }}
+                className="flex items-center gap-2 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-bold rounded-xl shadow-md shadow-indigo-200 transition-all"
+              >
+                + Add Question
+              </button>
+              <input
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                placeholder="Search questions…"
+                className="border-2 border-slate-200 rounded-xl px-4 py-2.5 text-sm w-64 focus:ring-2 focus:ring-indigo-400 focus:border-indigo-400 outline-none bg-white"
+              />
+              <select
+                value={filterSubj}
+                onChange={e => setFilterSubj(e.target.value)}
+                className="border-2 border-slate-200 rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-indigo-400 focus:border-indigo-400 outline-none bg-white"
+              >
+                {usedSubjects.map(s => <option key={s}>{s}</option>)}
+              </select>
+              <span className="ml-auto text-sm text-slate-500 font-medium">
+                {filtered.length} of {questions.length} questions
+              </span>
+            </div>
+
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+              {loading ? (
+                <div className="flex items-center justify-center py-24 text-slate-400">
+                  <span className="animate-spin mr-3 text-3xl">⟳</span>
+                  <span className="text-base">Loading questions…</span>
+                </div>
+              ) : filtered.length === 0 ? (
+                <div className="text-center py-24">
+                  <p className="text-6xl mb-4">📝</p>
+                  <p className="text-slate-500 text-xl font-semibold mb-1">
+                    {questions.length === 0 ? 'No questions yet' : 'No questions match your filter'}
+                  </p>
+                  <p className="text-slate-400 text-sm mb-6">
+                    {questions.length === 0
+                      ? 'Add questions manually or upload a PDF to extract them automatically.'
+                      : 'Try clearing the search or changing the subject filter.'}
+                  </p>
+                  {questions.length === 0 && (
+                    <button
+                      onClick={() => { setEditing({ ...BLANK_FORM, sequence_number: 1 }); setShowEditor(true) }}
+                      className="px-6 py-3 bg-indigo-600 text-white text-sm font-bold rounded-xl hover:bg-indigo-700 shadow-md"
+                    >
+                      Add First Question
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-slate-50 border-b border-slate-200 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">
+                      <th className="px-5 py-4 w-14">#</th>
+                      <th className="px-5 py-4 w-28">Subject</th>
+                      <th className="px-5 py-4 w-24">Type</th>
+                      <th className="px-5 py-4">Question</th>
+                      <th className="px-5 py-4 w-24 text-center">Marks</th>
+                      <th className="px-5 py-4 w-20 text-center">Answer</th>
+                      <th className="px-5 py-4 w-28 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {filtered.map(q => (
+                      <tr key={q.id} className="hover:bg-indigo-50/30 transition-colors group">
+                        <td className="px-5 py-4 font-bold text-slate-400 text-base">{q.sequence_number}</td>
+                        <td className="px-5 py-4">
+                          <span className={`text-xs font-bold px-2.5 py-1 rounded-full ${SUBJECT_COLORS[q.subject] || 'bg-slate-100 text-slate-700'}`}>
+                            {q.subject}
+                          </span>
+                        </td>
+                        <td className="px-5 py-4">
+                          <span className={`text-xs font-semibold px-2.5 py-1 rounded-lg ${TYPE_COLORS[q.question_type] || ''}`}>
+                            {q.question_type === 'single_mcq' ? 'MCQ' :
+                             q.question_type === 'multi_mcq'  ? 'Multi' : 'Numerical'}
+                          </span>
+                        </td>
+                        <td className="px-5 py-4 max-w-0">
+                          <div className="truncate text-slate-800 font-medium text-base leading-snug">
+                            <MathRenderer text={q.text?.slice(0, 120) + (q.text?.length > 120 ? '…' : '')} />
+                          </div>
+                          <div className="flex items-center gap-2 mt-1 flex-wrap">
+                            {q.image_url && (
+                              <span className="inline-flex items-center gap-1 text-xs text-blue-500 bg-blue-50 px-2 py-0.5 rounded-full">
+                                📷 question image
+                              </span>
+                            )}
+                            {q.option_images && Object.values(q.option_images).some(Boolean) && (
+                              <span className="inline-flex items-center gap-1 text-xs text-indigo-500 bg-indigo-50 px-2 py-0.5 rounded-full">
+                                🖼 option diagrams
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-5 py-4 text-center">
+                          <div className="flex flex-col items-center gap-0.5">
+                            <span className="text-green-700 font-bold text-sm">+{q.marks}</span>
+                            <span className="text-red-500 text-xs">−{q.negative_marks}</span>
+                          </div>
+                        </td>
+                        <td className="px-5 py-4 text-center">
+                          <span className="inline-flex w-8 h-8 rounded-full bg-green-100 text-green-800 text-sm font-bold items-center justify-center border border-green-200">
+                            {q.correct_answer}
+                          </span>
+                        </td>
+                        <td className="px-5 py-4 text-right">
+                          <div className="flex items-center justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <button
+                              onClick={() => { setEditing(q); setShowEditor(true) }}
+                              className="px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-semibold rounded-lg border border-indigo-200 transition-colors"
+                            >Edit</button>
+                            <button
+                              onClick={() => setDeleteConfirm(q.id)}
+                              className="px-3 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 text-xs font-semibold rounded-lg border border-red-200 transition-colors"
+                            >Delete</button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Empty state — no exam selected */}
         {!selectedExam && !loading && (
-          <div className="text-center py-24">
-            <p className="text-6xl mb-4">📋</p>
-            <p className="text-gray-500 text-xl font-medium">Create your first exam to start adding questions</p>
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm text-center py-28">
+            <p className="text-7xl mb-5">📋</p>
+            <p className="text-slate-700 text-2xl font-bold mb-2">No exam selected</p>
+            <p className="text-slate-400 text-base mb-8">Create an exam first, then add or upload questions.</p>
             <button
               onClick={() => setShowNewExam(true)}
-              className="mt-5 px-6 py-3 bg-indigo-600 text-white font-semibold rounded-xl hover:bg-indigo-700"
+              className="px-8 py-4 bg-indigo-600 text-white font-bold text-base rounded-2xl hover:bg-indigo-700 shadow-lg shadow-indigo-200 transition-all"
             >
-              Create Exam
+              + Create First Exam
             </button>
           </div>
         )}
@@ -1170,6 +1878,13 @@ export default function QuestionsPage() {
         />
       )}
 
+      {showUpload && (
+        <UploadPdfModal
+          onClose={() => { setShowUpload(false); refreshExtractions() }}
+          onFinishedExtraction={() => refreshExtractions()}
+        />
+      )}
+
       {showNewExam && (
         <CreateExamModal
           onCreated={(exam) => {
@@ -1182,23 +1897,49 @@ export default function QuestionsPage() {
       )}
 
       {deleteConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-          <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-sm w-full text-center">
-            <p className="text-4xl mb-3">🗑️</p>
-            <p className="text-gray-800 font-semibold text-lg mb-2">Delete this question?</p>
-            <p className="text-gray-500 text-sm mb-6">This action cannot be undone.</p>
-            <div className="flex gap-3 justify-center">
-              <button onClick={() => setDeleteConfirm(null)}
-                className="px-5 py-2 border border-gray-300 rounded-lg text-sm text-gray-600 hover:bg-gray-50">
-                Cancel
-              </button>
-              <button onClick={() => handleDelete(deleteConfirm)}
-                className="px-5 py-2 bg-red-600 hover:bg-red-700 text-white text-sm font-semibold rounded-lg">
-                Yes, Delete
-              </button>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-3xl shadow-2xl max-w-sm w-full overflow-hidden">
+            <div className="bg-gradient-to-r from-red-500 to-rose-600 px-8 py-5 text-center">
+              <p className="text-4xl mb-1">🗑️</p>
+              <h2 className="text-lg font-bold text-white">Delete Question?</h2>
+            </div>
+            <div className="p-7 text-center">
+              <p className="text-slate-500 text-sm mb-6">This question will be permanently removed from the exam. This cannot be undone.</p>
+              <div className="flex gap-3">
+                <button onClick={() => setDeleteConfirm(null)}
+                  className="flex-1 px-4 py-3 border-2 border-slate-200 rounded-xl text-sm font-semibold text-slate-600 hover:bg-slate-50">
+                  Cancel
+                </button>
+                <button onClick={() => handleDelete(deleteConfirm)}
+                  className="flex-1 px-4 py-3 bg-red-600 hover:bg-red-700 text-white text-sm font-bold rounded-xl shadow-md">
+                  Yes, Delete
+                </button>
+              </div>
             </div>
           </div>
         </div>
+      )}
+
+      {/* ── Go Live modal ── */}
+      {goLiveEx && (
+        <GoLiveModal
+          extraction={goLiveEx}
+          exams={exams}
+          onClose={() => setGoLiveEx(null)}
+          onSuccess={() => { setGoLiveEx(null); refreshExtractions() }}
+        />
+      )}
+
+      {/* ── Delete extraction confirmation ── */}
+      {delExConfirm && (
+        <DeleteExtractionModal
+          extraction={delExConfirm}
+          onClose={() => setDelExConfirm(null)}
+          onDeleted={() => {
+            setDelExConfirm(null)
+            refreshExtractions()
+          }}
+        />
       )}
 
     </div>

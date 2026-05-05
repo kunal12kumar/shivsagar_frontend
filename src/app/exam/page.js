@@ -16,8 +16,80 @@ import ExamTimer from '@/components/exam/ExamTimer'
 import { VoiceMonitor } from '@/lib/proctoring/VoiceMonitor'
 import { SnapshotWorker } from '@/lib/proctoring/SnapshotWorker'
 import { GazeTracker } from '@/lib/proctoring/GazeTracker'
-import { getExamInfo, startExam, submitExam, getQuestionBatch, reportViolation } from '@/lib/api/client'
+import { getActiveExam, getExamInfo, startExam, submitExam, getAllQuestions, reportViolation } from '@/lib/api/client'
 import { clsx } from 'clsx'
+
+// ── 15-Minute Pre-Exam Countdown Screen ──────────────────────────────────────
+function CountdownScreen({ initialSecs, candidateName, onDone }) {
+  const [secs, setSecs] = useState(Math.max(0, initialSecs))
+
+  useEffect(() => {
+    if (secs <= 0) { onDone(); return }
+    const t = setTimeout(() => setSecs(s => s - 1), 1000)
+    return () => clearTimeout(t)
+  }, [secs, onDone])
+
+  const mins = Math.floor(secs / 60)
+  const ss   = String(secs % 60).padStart(2, '0')
+  const pct  = Math.max(0, Math.min(100, (1 - secs / (15 * 60)) * 100))
+
+  return (
+    <div className="min-h-screen bg-exam-navy flex items-center justify-center p-4">
+      <div className="text-center max-w-lg w-full">
+        {/* Logo */}
+        <div className="mb-10">
+          <p className="text-white/40 text-xs uppercase tracking-widest mb-1">
+            Rajiv Gandhi Institute of Petroleum Technology
+          </p>
+          <p className="text-white font-bold text-2xl">DAT 2026 — Exam Portal</p>
+        </div>
+
+        {/* Candidate greeting */}
+        <p className="text-white/70 text-sm mb-8">
+          Welcome, <span className="text-white font-semibold">{candidateName}</span>
+        </p>
+
+        {/* Countdown ring */}
+        <div className="relative w-48 h-48 mx-auto mb-8">
+          <svg className="w-48 h-48 -rotate-90" viewBox="0 0 120 120">
+            <circle cx="60" cy="60" r="54" fill="none" stroke="rgba(255,255,255,0.1)" strokeWidth="8" />
+            <circle
+              cx="60" cy="60" r="54" fill="none"
+              stroke="#34d399" strokeWidth="8"
+              strokeDasharray={`${2 * Math.PI * 54}`}
+              strokeDashoffset={`${2 * Math.PI * 54 * (1 - pct / 100)}`}
+              strokeLinecap="round"
+              style={{ transition: 'stroke-dashoffset 1s linear' }}
+            />
+          </svg>
+          <div className="absolute inset-0 flex flex-col items-center justify-center">
+            <span className="text-5xl font-bold text-white tabular-nums">
+              {mins}:{ss}
+            </span>
+            <span className="text-white/50 text-xs mt-1">remaining</span>
+          </div>
+        </div>
+
+        {/* Status */}
+        <div className="bg-white/10 rounded-2xl px-8 py-5 mb-6">
+          <div className="flex items-center justify-center gap-2 mb-2">
+            <span className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse" />
+            <p className="text-emerald-400 font-semibold text-sm">Exam is Live</p>
+          </div>
+          <p className="text-white/70 text-sm leading-relaxed">
+            The exam has been started by the Exam Controller.
+            Your question paper will appear automatically when the countdown ends.
+          </p>
+        </div>
+
+        <div className="flex items-center justify-center gap-6 text-white/40 text-xs">
+          <span>📋 Do not close this tab</span>
+          <span>⏳ Questions appear after countdown</span>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 export default function ExamPage() {
   const router = useRouter()
@@ -34,9 +106,13 @@ export default function ExamPage() {
   const [paused, setPaused] = useState(false)
   const [connectionStatus, setConnectionStatus] = useState('connecting')
 
+  // 15-minute pre-exam countdown state
+  const [countdownSecs, setCountdownSecs] = useState(null)  // null = not yet determined
+  const [countdownDone, setCountdownDone] = useState(false)
+
   const {
     jwt, examId, candidateId, candidateName,
-    questions, currentQuestion, answers, examStatus,
+    questions, currentQuestion, answers, examStatus, submittedExamId,
     setExamMeta, setQuestions, setCurrentQuestion,
     setAnswer, confirmAnswer, addViolation,
     setConnected, setExamStatus, setIntegrityScore,
@@ -48,6 +124,23 @@ export default function ExamPage() {
     if (_hasHydrated && !jwt) router.push('/login')
   }, [_hasHydrated, jwt, router])
 
+  // Guard: submitted for THIS exam → redirect to /submitted.
+  // If the active exam is DIFFERENT from the one that was submitted, clear the
+  // submitted status so the candidate can participate in the new exam.
+  useEffect(() => {
+    if (!_hasHydrated || examStatus !== 'submitted') return
+
+    // We need the active exam id to compare. It's available in the store as examId
+    // (updated by instructions/page.js from getActiveExam()). If they differ, reset.
+    if (submittedExamId && examId && submittedExamId !== examId) {
+      // New exam published — clear the lock so candidate can participate
+      useExamStore.setState({ examStatus: 'not_started', submittedExamId: null })
+      return
+    }
+    // Same exam (or no exam context yet) — stay locked
+    router.replace('/submitted')
+  }, [_hasHydrated, examStatus, router])
+
   // Load exam data and start WebSocket
   useEffect(() => {
     if (!jwt || !examId) return
@@ -56,37 +149,75 @@ export default function ExamPage() {
 
     const load = async () => {
       try {
-        const res = await getExamInfo(examId)
+        // Always fetch the ACTIVE exam — overrides stale examId from registration
+        const activeRes = await getActiveExam()
+        if (cancelled) return
+        const activeExamId = activeRes.data.id
+
+        // Update store if exam_id changed (candidate was on old paper)
+        if (activeExamId !== examId) {
+          useExamStore.setState({ examId: activeExamId })
+        }
+
+        const res = await getExamInfo(activeExamId)
         if (cancelled) return
         const exam = res.data
 
-        // Officially start the exam — this records exam_started_at for the candidate
-        // and returns the authoritative end_time (fresh if the scheduled one expired).
-        const startRes = await startExam(examId)
+        // Officially start the exam — returns authoritative end_time & questions_available_at.
+        // 409 = already submitted (backend enforces single-attempt rule).
+        let startRes
+        try {
+          startRes = await startExam(activeExamId)
+        } catch (startErr) {
+          if (startErr.response?.status === 409) {
+            // Candidate already submitted THIS exam — lock for this exam only
+            useExamStore.setState({ examStatus: 'submitted', submittedExamId: activeExamId })
+            router.replace('/submitted')
+            return
+          }
+          throw startErr  // re-throw other errors to the outer catch
+        }
         if (cancelled) return
         const endTime = startRes.data.end_time
+        const questionsAt = startRes.data.questions_available_at
 
         setExamMeta({
           examTitle: exam.title,
           totalQuestions: exam.total_questions,
           examDuration: exam.duration_minutes,
-          serverEndTime: endTime,   // ← always use the start-response end_time
+          serverEndTime: endTime,
+          questionsAvailableAt: questionsAt,
           examStatus: 'active',
         })
 
-        // Load first batch of questions
-        const batchRes = await getQuestionBatch(examId, 0)
-        if (cancelled) return
-        setQuestions(batchRes.data.questions)
-        setExamLoaded(true)
+        // Compute countdown remaining
+        const now = Date.now()
+        const availAt = questionsAt ? new Date(questionsAt).getTime() : now
+        const secsRemaining = Math.ceil((availAt - now) / 1000)
+
+        if (secsRemaining > 0) {
+          // Countdown in progress — don't load questions yet; CountdownScreen handles transition
+          setCountdownSecs(secsRemaining)
+        } else {
+          // Countdown already over — load all questions immediately
+          setCountdownDone(true)
+          const allRes = await getAllQuestions(activeExamId)
+          if (cancelled) return
+          setQuestions(allRes.data.questions)
+          setExamLoaded(true)
+        }
       } catch (err) {
-        if (!cancelled) setLoadError('Failed to load exam. Please check your connection and try again.')
+        if (!cancelled) {
+          const msg = err.response?.data?.detail || err.message || 'Failed to load exam'
+          setLoadError(msg)
+        }
       }
     }
 
     load()
 
-    // Connect WebSocket
+    // Connect WebSocket with the stored examId — the load() fn updates it if active exam differs.
+    // wsClient.sendAnswer() etc. read examId from the store at call time, so this is fine.
     wsClient.connect(jwt, examId, candidateId)
 
     // WS event handlers
@@ -124,12 +255,22 @@ export default function ExamPage() {
     const offTimeUpdate = wsClient.on('TIMER_SYNC', (msg) => {
       useExamStore.setState({ serverEndTime: msg.end_time })
     })
+    // Exam forcefully ended by controller — auto-submit and redirect
+    const offEnded = wsClient.on('EXAM_ENDED', async () => {
+      try {
+        const endedExamId = useExamStore.getState().examId
+        useExamStore.setState({ examStatus: 'submitted', submittedExamId: endedExamId })
+        await submitExam(endedExamId, useExamStore.getState().answers)
+      } catch (_) {}
+      wsClient.disconnect()
+      router.replace('/submitted')
+    })
 
     return () => {
       cancelled = true
       offConnected(); offDisconnected(); offUnavailable(); offRecovered()
       offBulkSync(); offAck()
-      offPause(); offResume(); offScore(); offTimeUpdate()
+      offPause(); offResume(); offScore(); offTimeUpdate(); offEnded()
     }
   }, [jwt, examId, candidateId])
 
@@ -184,6 +325,19 @@ export default function ExamPage() {
     }
   }, [examLoaded, examId, candidateId, addViolation])
 
+  // Load ALL questions once the countdown finishes
+  useEffect(() => {
+    if (!countdownDone || examLoaded) return
+    const activeExamId = useExamStore.getState().examId
+    if (!activeExamId) return
+    getAllQuestions(activeExamId).then((res) => {
+      setQuestions(res.data.questions)
+      setExamLoaded(true)
+    }).catch(() => {
+      setLoadError('Failed to load questions after countdown. Please refresh.')
+    })
+  }, [countdownDone, examLoaded, setQuestions])
+
   // Send pending answers to WS whenever answers state changes.
   // When WS is offline, immediately confirm locally so the "Saving…" spinner
   // doesn't persist — the answers are already in localStorage and will be
@@ -206,31 +360,32 @@ export default function ExamPage() {
 
   const handleSubmit = async () => {
     setSubmitting(true)
+    const currentExamId = useExamStore.getState().examId
     try {
-      setExamStatus('submitted')
-      await submitExam(examId, useExamStore.getState().answers)
+      // Record submission BEFORE the API call so a page-reload during submit
+      // still shows the locked screen (idempotent — server upserts answers).
+      useExamStore.setState({ examStatus: 'submitted', submittedExamId: currentExamId })
+      await submitExam(currentExamId, useExamStore.getState().answers)
       wsClient.disconnect()
-      router.push('/submitted')
+      // replace() removes /exam from history so the back button cannot reattempt
+      router.replace('/submitted')
     } catch {
+      // On failure, reset status so candidate can retry submit
+      useExamStore.setState({ examStatus: 'active', submittedExamId: null })
       setSubmitting(false)
     }
   }
 
   const handleNavigate = (idx) => {
     setCurrentQuestion(idx)
-    // Prefetch next batch if near end of current batch
-    if (idx > 0 && idx % 8 === 0) {
-      const batchNum = Math.floor(idx / 10) + 1
-      getQuestionBatch(examId, batchNum).then((res) => {
-        const existing = useExamStore.getState().questions
-        const newQs = res.data.questions.filter(q => !existing.find(e => e.id === q.id))
-        useExamStore.setState({ questions: [...existing, ...newQs] })
-      }).catch(() => {})
-    }
+    // All questions are loaded upfront via getAllQuestions — no lazy prefetching needed
   }
 
   // Wait for Zustand to rehydrate from localStorage before rendering
   if (!_hasHydrated || !jwt) return null
+
+  // Synchronous guard: already submitted — show nothing while the useEffect redirects
+  if (examStatus === 'submitted') return null
 
   if (loadError) {
     return (
@@ -245,6 +400,17 @@ export default function ExamPage() {
           </button>
         </div>
       </div>
+    )
+  }
+
+  // 15-minute pre-exam countdown screen
+  if (countdownSecs !== null && !countdownDone && !examLoaded) {
+    return (
+      <CountdownScreen
+        initialSecs={countdownSecs}
+        candidateName={candidateName}
+        onDone={() => setCountdownDone(true)}
+      />
     )
   }
 
@@ -386,7 +552,7 @@ export default function ExamPage() {
                   </div>
                 </div>
                 <div className="p-3 bg-gray-50 rounded-lg text-xs text-exam-muted">
-                  Webcam snapshots every 2 minutes. Do not leave this window.
+                  Webcam snapshots every 1 minute. Do not leave this window.
                 </div>
               </div>
             )}

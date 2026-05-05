@@ -83,6 +83,11 @@ export default function PreExamChecklist({ examId, candidateId, onComplete }) {
   }
 
   const runChecks = useCallback(async () => {
+    // Reset all state so a retry starts completely fresh
+    setStatuses({})
+    setDetails({})
+    setAllPassed(false)
+    setHasBlocker(false)
     setRunning(true)
     let blocked = false
 
@@ -253,7 +258,8 @@ export default function PreExamChecklist({ examId, candidateId, onComplete }) {
         ))}
       </div>
 
-      {!running && !allPassed && (
+      {/* ── Initial start (no checks run yet) ── */}
+      {!running && !allPassed && !hasBlocker && Object.keys(statuses).length === 0 && (
         <button
           onClick={runChecks}
           className="w-full bg-exam-blue text-white py-3 rounded-xl font-semibold hover:bg-blue-700 transition-colors"
@@ -262,24 +268,48 @@ export default function PreExamChecklist({ examId, candidateId, onComplete }) {
         </button>
       )}
 
+      {/* ── Running indicator ── */}
       {running && (
-        <div className="text-center text-exam-muted text-sm py-3">
-          Running checks — please wait...
+        <div className="flex items-center justify-center gap-2 py-3 text-exam-muted text-sm">
+          <svg className="w-4 h-4 animate-spin text-exam-blue" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.37 0 0 5.37 0 12h4z"/>
+          </svg>
+          Running checks — please wait…
         </div>
       )}
 
-      {hasBlocker && (
-        <div className="bg-exam-red-light border border-red-300 rounded-xl p-4 text-center text-sm text-exam-red font-medium">
-          One or more critical checks failed. Please fix the issue and run the check again.
+      {/* ── Failure: error message + prominent Retry button ── */}
+      {hasBlocker && !running && (
+        <div className="flex flex-col gap-3">
+          <div className="bg-exam-red-light border border-red-300 rounded-xl p-4 text-center">
+            <p className="text-sm text-exam-red font-semibold mb-1">
+              ❌ One or more critical checks failed
+            </p>
+            <p className="text-xs text-exam-red/80">
+              Fix the issue shown above (webcam, microphone, or face mismatch), then retry.
+            </p>
+          </div>
+          <button
+            onClick={runChecks}
+            className="w-full flex items-center justify-center gap-2 bg-exam-blue text-white py-3 rounded-xl font-semibold hover:bg-blue-700 transition-colors"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+            Retry System Check
+          </button>
         </div>
       )}
 
+      {/* ── All passed — proceed to exam ── */}
       {allPassed && (
         <button
           onClick={onComplete}
           className="w-full bg-exam-green text-white py-3 rounded-xl font-semibold hover:bg-green-700 transition-colors"
         >
-          All Checks Passed — Start Exam →
+          ✓ All Checks Passed — Proceed to Exam →
         </button>
       )}
     </div>
