@@ -1110,10 +1110,7 @@ function UploadPdfModal({ onClose, onFinishedExtraction }) {
               {noWorker && (
                 <div className="mt-3 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-800">
                   <p className="font-bold mb-1">⚠ Celery worker not detected</p>
-                  <p className="font-mono bg-amber-100 px-2 py-1 rounded select-all">
-                    celery -A api.tasks.workers.celery_app worker -Q mysql_writes,default --loglevel=info --pool=solo
-                  </p>
-                  <p className="mt-1 text-amber-600">Run the command above in your backend terminal, then click Retry below.</p>
+                  <p className="mt-1 text-amber-600">Task is queued. The worker auto-starts with the container — if extraction does not begin within 30 seconds, check server logs and click Retry below.</p>
                 </div>
               )}
 
