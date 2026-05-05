@@ -988,7 +988,7 @@ function UploadPdfModal({ onClose, onFinishedExtraction }) {
   const isDone       = progress?.status === 'pending_review' || progress?.status === 'finalized'
   const isFailed     = progress?.status === 'failed' || !!error
   const isRunning    = !!extractionId && !isDone && !isFailed
-  const noWorker     = progress?.progress_message?.includes('No Celery worker')
+  const noWorker     = false  // ping() removed — worker always auto-starts with container
   // "stuck" = queued or uploaded with 0% after upload finished
   const isStuck      = isRunning && (progress?.status === 'uploaded') && !uploading
   const [retrying, setRetrying] = useState(false)
