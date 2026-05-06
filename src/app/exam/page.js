@@ -431,131 +431,208 @@ export default function ExamPage() {
   const currentQ = questions[currentQuestion]
   const totalQ = questions.length
 
+  const answeredCount = Object.keys(answers).length
+  const progressPct   = totalQ > 0 ? Math.round((answeredCount / totalQ) * 100) : 0
+
   return (
     <AntiCheatWrapper examId={examId}>
-      <div className="h-screen bg-exam-bg flex flex-col overflow-hidden">
-        {/* Top bar */}
-        <div className="flex-shrink-0 bg-white border-b border-exam-border px-4 py-2 flex items-center justify-between">
+      <div className="h-screen flex flex-col overflow-hidden" style={{ background: '#f1f5f9' }}>
+
+        {/* ── Top bar ───────────────────────────────────────────────────────── */}
+        <div className="flex-shrink-0 bg-white shadow-sm px-5 py-0 flex items-stretch justify-between" style={{ minHeight: '56px', borderBottom: '1px solid #e2e8f0' }}>
+          {/* Left: branding */}
           <div className="flex items-center gap-3">
-            <div className="font-bold text-exam-blue text-sm">RGIPT</div>
-            <div className="h-4 w-px bg-exam-border" />
-            <div className="text-sm text-exam-text font-medium">DAT 2026</div>
-            <div className={clsx(
-              'text-xs px-2 py-0.5 rounded-full font-medium',
-              connectionStatus === 'connected'    ? 'bg-exam-green-light text-exam-green' :
-              connectionStatus === 'reconnecting' ? 'bg-exam-amber-light text-exam-amber' :
-              /* offline */                         'bg-gray-100 text-gray-400'
-            )}>
-              {connectionStatus === 'connected'    ? '● Connected' :
-               connectionStatus === 'reconnecting' ? '● Connecting...' :
-               /* offline */                         '● Offline mode'}
+            <div style={{ width: '4px', alignSelf: 'stretch', background: '#7c3aed', borderRadius: '0' }} />
+            <div className="flex items-center gap-2.5 pl-1">
+              <span className="font-extrabold text-slate-800 text-base tracking-tight">RGIPT</span>
+              <span className="w-px h-5 bg-slate-200" />
+              <span className="text-sm font-semibold text-slate-600">DAT 2026</span>
             </div>
+            {/* Connection pill */}
+            <span className={clsx(
+              'inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-full ml-1',
+              connectionStatus === 'connected'    ? 'bg-emerald-100 text-emerald-700' :
+              connectionStatus === 'reconnecting' ? 'bg-amber-100 text-amber-700' :
+                                                    'bg-slate-100 text-slate-500'
+            )}>
+              <span className={clsx(
+                'w-1.5 h-1.5 rounded-full',
+                connectionStatus === 'connected'    ? 'bg-emerald-500 animate-pulse' :
+                connectionStatus === 'reconnecting' ? 'bg-amber-500 animate-pulse' :
+                                                      'bg-slate-400'
+              )} />
+              {connectionStatus === 'connected' ? 'Connected' : connectionStatus === 'reconnecting' ? 'Reconnecting…' : 'Offline'}
+            </span>
           </div>
-          <div className="flex items-center gap-3">
+
+          {/* Right: timer + name + submit */}
+          <div className="flex items-center gap-4">
+            {/* Timer — ExamTimer has its own colored background */}
             <ExamTimer onTimeUp={() => setShowSubmitDialog(true)} />
-            <div className="text-sm text-exam-muted hidden sm:block">
+            {/* Candidate name */}
+            <div className="hidden sm:flex items-center gap-2 text-sm font-semibold text-slate-700">
+              <div className="w-7 h-7 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-700 text-xs font-extrabold">
+                {candidateName?.charAt(0)?.toUpperCase() || 'C'}
+              </div>
               {candidateName}
             </div>
+            {/* Submit */}
             <button
               onClick={() => setShowSubmitDialog(true)}
-              className="bg-exam-red text-white text-sm px-4 py-1.5 rounded-lg font-medium hover:bg-red-700 transition-colors"
+              className="flex items-center gap-2 text-sm font-bold px-5 py-2 rounded-xl transition-all active:scale-95"
+              style={{ background: '#dc2626', color: '#fff', boxShadow: '0 2px 8px rgba(220,38,38,0.3)' }}
             >
               Submit Exam
             </button>
           </div>
         </div>
 
-        {/* Pause overlay */}
+        {/* Progress bar */}
+        <div className="flex-shrink-0 h-1 bg-slate-200">
+          <div
+            className="h-1 transition-all duration-500"
+            style={{ width: `${progressPct}%`, background: 'linear-gradient(90deg, #6366f1, #8b5cf6)' }}
+          />
+        </div>
+
+        {/* ── Pause overlay ─────────────────────────────────────────────────── */}
         {paused && (
-          <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center">
-            <div className="bg-white rounded-2xl p-8 text-center">
-              <div className="text-4xl mb-4">⏸️</div>
-              <h2 className="text-xl font-bold text-exam-text">Exam Paused</h2>
-              <p className="text-exam-muted text-sm mt-2">The exam has been paused by the administrator. Please wait.</p>
+          <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center">
+            <div className="bg-white rounded-3xl p-10 text-center shadow-2xl max-w-sm mx-4">
+              <div className="w-16 h-16 bg-amber-100 rounded-full flex items-center justify-center text-3xl mx-auto mb-5">⏸️</div>
+              <h2 className="text-xl font-bold text-slate-800 mb-2">Exam Paused</h2>
+              <p className="text-slate-500 text-sm">The exam controller has paused the exam. Please wait until it resumes.</p>
             </div>
           </div>
         )}
 
-        {/* Main content */}
+        {/* ── Main content ──────────────────────────────────────────────────── */}
         <div className="flex-1 flex overflow-hidden">
+
           {/* Question area */}
-          <div className="flex-1 overflow-y-auto p-4 lg:p-6">
-            <div className="max-w-2xl mx-auto">
-              {/* Question breadcrumb */}
-              <div className="flex items-center justify-between mb-4">
-                <span className="text-sm text-exam-muted">
-                  Question <strong className="text-exam-text">{currentQuestion + 1}</strong> of {totalQ}
-                </span>
+          <div className="flex-1 overflow-y-auto" style={{ padding: '24px 28px' }}>
+            <div style={{ maxWidth: '740px', margin: '0 auto' }}>
+
+              {/* Breadcrumb + nav row */}
+              <div className="flex items-center justify-between mb-5">
+                <div className="flex items-center gap-3">
+                  <span className="text-sm text-slate-500 font-medium">
+                    Question <strong className="text-slate-800 text-base">{currentQuestion + 1}</strong>
+                    <span className="text-slate-400"> / {totalQ}</span>
+                  </span>
+                  {/* Mini progress pill */}
+                  <span className="text-xs font-semibold px-2.5 py-1 rounded-full"
+                    style={{ background: '#ede9fe', color: '#7c3aed' }}>
+                    {progressPct}% done
+                  </span>
+                </div>
                 <div className="flex gap-2">
                   <button
                     onClick={() => handleNavigate(Math.max(0, currentQuestion - 1))}
                     disabled={currentQuestion === 0}
-                    className="flex items-center gap-1.5 px-4 py-1.5 text-sm font-semibold rounded-lg border-2 border-exam-blue text-exam-blue bg-white hover:bg-exam-blue hover:text-white active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-white disabled:hover:text-exam-blue transition-all duration-150"
+                    className="flex items-center gap-1.5 text-sm font-semibold rounded-xl transition-all active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed"
+                    style={{ padding: '8px 18px', border: '2px solid #6366f1', color: '#4f46e5', background: '#fff' }}
+                    onMouseEnter={e => { if (currentQuestion > 0) { e.currentTarget.style.background='#6366f1'; e.currentTarget.style.color='#fff' }}}
+                    onMouseLeave={e => { e.currentTarget.style.background='#fff'; e.currentTarget.style.color='#4f46e5' }}
                   >
                     ← Prev
                   </button>
                   <button
                     onClick={() => handleNavigate(Math.min(totalQ - 1, currentQuestion + 1))}
                     disabled={currentQuestion === totalQ - 1}
-                    className="flex items-center gap-1.5 px-4 py-1.5 text-sm font-semibold rounded-lg bg-exam-blue text-white hover:bg-blue-700 active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-exam-blue transition-all duration-150"
+                    className="flex items-center gap-1.5 text-sm font-semibold rounded-xl text-white transition-all active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed"
+                    style={{ padding: '8px 18px', background: '#6366f1', boxShadow: '0 2px 8px rgba(99,102,241,0.3)' }}
                   >
                     Next →
                   </button>
                 </div>
               </div>
+
+              {/* Question panel */}
               <QuestionPanel
                 question={currentQ}
                 questionNumber={currentQuestion + 1}
                 totalQuestions={totalQ}
               />
+
+              {/* Bottom nav (duplicate for long questions) */}
+              <div className="flex justify-between mt-6 pt-4 border-t border-slate-200">
+                <button
+                  onClick={() => handleNavigate(Math.max(0, currentQuestion - 1))}
+                  disabled={currentQuestion === 0}
+                  className="flex items-center gap-1.5 text-sm font-semibold rounded-xl transition-all active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed"
+                  style={{ padding: '8px 18px', border: '2px solid #6366f1', color: '#4f46e5', background: '#fff' }}
+                  onMouseEnter={e => { if (currentQuestion > 0) { e.currentTarget.style.background='#6366f1'; e.currentTarget.style.color='#fff' }}}
+                  onMouseLeave={e => { e.currentTarget.style.background='#fff'; e.currentTarget.style.color='#4f46e5' }}
+                >
+                  ← Previous
+                </button>
+                <button
+                  onClick={() => handleNavigate(Math.min(totalQ - 1, currentQuestion + 1))}
+                  disabled={currentQuestion === totalQ - 1}
+                  className="flex items-center gap-1.5 text-sm font-semibold rounded-xl text-white transition-all active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed"
+                  style={{ padding: '8px 18px', background: '#6366f1', boxShadow: '0 2px 8px rgba(99,102,241,0.3)' }}
+                >
+                  Save &amp; Next →
+                </button>
+              </div>
             </div>
           </div>
 
-          {/* Right sidebar */}
-          <div className="flex-shrink-0 w-64 border-l border-exam-border bg-white overflow-y-auto p-4 hidden lg:block">
-            {/* Sidebar tabs */}
-            <div className="flex mb-4 border border-exam-border rounded-lg overflow-hidden">
-              {['grid', 'info'].map((tab) => (
-                <button
-                  key={tab}
-                  onClick={() => setSidebarTab(tab)}
-                  className={clsx(
-                    'flex-1 py-1.5 text-xs font-medium capitalize transition-colors',
-                    sidebarTab === tab ? 'bg-exam-blue text-white' : 'text-exam-muted hover:bg-gray-50'
-                  )}
-                >
-                  {tab === 'grid' ? 'Questions' : 'Info'}
-                </button>
-              ))}
+          {/* ── Right sidebar ────────────────────────────────────────────────── */}
+          <div className="flex-shrink-0 hidden lg:flex flex-col overflow-hidden"
+            style={{ width: '288px', borderLeft: '1px solid #e2e8f0', background: '#fff' }}>
+
+            {/* Sidebar header */}
+            <div style={{ padding: '14px 16px 0', borderBottom: '1px solid #f1f5f9', flexShrink: 0 }}>
+              <div className="flex rounded-xl overflow-hidden border border-slate-200 mb-3">
+                {[['grid', 'Questions'], ['info', 'Info']].map(([tab, label]) => (
+                  <button
+                    key={tab}
+                    onClick={() => setSidebarTab(tab)}
+                    className="flex-1 py-2 text-xs font-bold transition-all"
+                    style={{
+                      background: sidebarTab === tab ? '#6366f1' : '#fff',
+                      color: sidebarTab === tab ? '#fff' : '#64748b',
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
             </div>
 
-            {sidebarTab === 'grid' && (
-              <QuestionGrid questions={questions} onNavigate={handleNavigate} />
-            )}
+            {/* Sidebar body — scrollable */}
+            <div className="flex-1 overflow-y-auto" style={{ padding: '16px' }}>
 
-            {sidebarTab === 'info' && (
-              <div className="flex flex-col gap-3 text-sm">
-                <div className="p-3 bg-exam-blue-light rounded-lg">
-                  <div className="font-medium text-exam-blue mb-1">Exam Info</div>
-                  <div className="text-exam-muted text-xs space-y-1">
-                    <div>Total Questions: {totalQ}</div>
-                    <div>Duration: 3 hours</div>
-                    <div>Marking: +4 / −1</div>
+              {sidebarTab === 'grid' && (
+                <QuestionGrid questions={questions} onNavigate={handleNavigate} />
+              )}
+
+              {sidebarTab === 'info' && (
+                <div className="flex flex-col gap-3 text-sm">
+                  <div className="rounded-2xl p-4" style={{ background: '#ede9fe', border: '1px solid #ddd6fe' }}>
+                    <div className="font-bold text-indigo-700 mb-2 text-xs uppercase tracking-wider">Exam Info</div>
+                    <div className="space-y-1.5 text-xs text-indigo-900">
+                      <div className="flex justify-between"><span className="text-indigo-600">Questions</span><strong>{totalQ}</strong></div>
+                      <div className="flex justify-between"><span className="text-indigo-600">Duration</span><strong>3 hours</strong></div>
+                      <div className="flex justify-between"><span className="text-indigo-600">Marking</span><strong>+4 / −1</strong></div>
+                    </div>
+                  </div>
+                  <div className="rounded-2xl p-4" style={{ background: '#fff7ed', border: '1px solid #fed7aa' }}>
+                    <div className="font-bold text-amber-700 mb-2 text-xs uppercase tracking-wider">⚠ Proctoring Active</div>
+                    <div className="space-y-1.5 text-xs text-amber-800">
+                      <div className="flex items-center gap-2"><span className="w-1.5 h-1.5 bg-amber-500 rounded-full" />Face monitoring: ON</div>
+                      <div className="flex items-center gap-2"><span className="w-1.5 h-1.5 bg-amber-500 rounded-full" />Voice monitoring: ON</div>
+                      <div className="flex items-center gap-2"><span className="w-1.5 h-1.5 bg-amber-500 rounded-full" />Screen recording: ON</div>
+                    </div>
+                  </div>
+                  <div className="rounded-2xl p-3 text-xs text-slate-500 bg-slate-50 border border-slate-200">
+                    Webcam snapshots every 60 sec. Do not leave this window.
                   </div>
                 </div>
-                <div className="p-3 bg-exam-amber-light rounded-lg">
-                  <div className="font-medium text-exam-amber mb-1 text-xs">⚠️ Proctoring Active</div>
-                  <div className="text-exam-muted text-xs space-y-1">
-                    <div>• Face monitoring: ON</div>
-                    <div>• Voice monitoring: ON</div>
-                    <div>• Screen recording: ON</div>
-                  </div>
-                </div>
-                <div className="p-3 bg-gray-50 rounded-lg text-xs text-exam-muted">
-                  Webcam snapshots every 1 minute. Do not leave this window.
-                </div>
-              </div>
-            )}
+              )}
+            </div>
           </div>
         </div>
 
@@ -563,35 +640,45 @@ export default function ExamPage() {
         <video ref={videoRef} className="hidden" muted playsInline />
       </div>
 
-      {/* Submit dialog */}
+      {/* ── Submit dialog ──────────────────────────────────────────────────── */}
       {showSubmitDialog && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl p-6 max-w-sm w-full shadow-xl">
-            <h3 className="text-lg font-bold text-exam-text mb-3">Submit Exam?</h3>
-            <div className="space-y-2 text-sm text-exam-muted mb-6">
-              <p>Once submitted, you cannot make any changes.</p>
-              <div className="bg-exam-blue-light rounded-lg p-3 text-exam-text">
-                <div className="font-medium mb-1">Summary</div>
-                <div className="text-xs space-y-1">
-                  <div>Answered: {Object.keys(answers).length} / {totalQ}</div>
-                  <div>Not attempted: {totalQ - Object.keys(answers).length}</div>
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: 'rgba(15,23,42,0.6)', backdropFilter: 'blur(4px)' }}>
+          <div className="bg-white rounded-3xl p-7 max-w-sm w-full shadow-2xl">
+            <div className="w-14 h-14 rounded-2xl bg-red-50 flex items-center justify-center text-2xl mx-auto mb-4">📋</div>
+            <h3 className="text-xl font-extrabold text-slate-800 text-center mb-1">Submit Exam?</h3>
+            <p className="text-sm text-slate-500 text-center mb-5">Once submitted, you cannot make any changes.</p>
+
+            {/* Summary */}
+            <div className="rounded-2xl p-4 mb-5" style={{ background: '#f8fafc', border: '1px solid #e2e8f0' }}>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="flex flex-col items-center bg-emerald-50 rounded-xl py-3 border border-emerald-200">
+                  <span className="text-2xl font-extrabold text-emerald-600">{answeredCount}</span>
+                  <span className="text-xs text-emerald-600 font-semibold mt-0.5">Answered</span>
+                </div>
+                <div className="flex flex-col items-center bg-slate-50 rounded-xl py-3 border border-slate-200">
+                  <span className="text-2xl font-extrabold text-slate-500">{totalQ - answeredCount}</span>
+                  <span className="text-xs text-slate-500 font-semibold mt-0.5">Unattempted</span>
                 </div>
               </div>
             </div>
+
             <div className="flex gap-3">
               <button
                 onClick={() => setShowSubmitDialog(false)}
-                className="flex-1 py-2.5 border border-exam-border rounded-lg text-sm font-medium text-exam-muted hover:bg-gray-50"
                 disabled={submitting}
+                className="flex-1 py-3 rounded-xl text-sm font-bold text-slate-600 transition-colors"
+                style={{ border: '2px solid #e2e8f0', background: '#fff' }}
               >
-                Cancel
+                Go Back
               </button>
               <button
                 onClick={handleSubmit}
                 disabled={submitting}
-                className="flex-1 py-2.5 bg-exam-red text-white rounded-lg text-sm font-medium hover:bg-red-700 disabled:opacity-50"
+                className="flex-1 py-3 rounded-xl text-sm font-bold text-white transition-all active:scale-95 disabled:opacity-50"
+                style={{ background: '#dc2626', boxShadow: '0 2px 8px rgba(220,38,38,0.3)' }}
               >
-                {submitting ? 'Submitting...' : 'Yes, Submit'}
+                {submitting ? 'Submitting…' : 'Yes, Submit'}
               </button>
             </div>
           </div>
