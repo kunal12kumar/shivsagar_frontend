@@ -1,22 +1,26 @@
 /**
  * GazeTracker — uses MediaPipe FaceMesh (WASM, runs entirely in the browser).
  * Detects look-away events: if candidate's gaze deviates for > 3 seconds → violation.
- * Runs at 10fps. After firing a violation, enters a 15-second cooldown to prevent flooding.
+ * Uses requestAnimationFrame loop at ~10fps instead of MediaPipe Camera utility
+ * for more reliable frame feeding.
  */
 export class GazeTracker {
   constructor() {
     this.faceMesh = null
-    this.camera = null
     this.lookAwayStart = null
     this.examActive = false
     this.onViolation = null
     this.videoEl = null
+    this.animFrameId = null
+    this.processing = false
 
     this.LOOK_AWAY_THRESHOLD_MS = 3000
     this.VIOLATION_COOLDOWN_MS = 15000
     this.GAZE_X_THRESHOLD = 0.15
     this.GAZE_Y_THRESHOLD = 0.12
+    this.FRAME_INTERVAL_MS = 100  // ~10fps
     this.lastViolationTime = 0
+    this.lastFrameTime = 0
   }
 
   async start(videoElement, onViolation) {
@@ -26,7 +30,6 @@ export class GazeTracker {
 
     try {
       const { FaceMesh } = await import('@mediapipe/face_mesh')
-      const { Camera } = await import('@mediapipe/camera_utils')
 
       this.faceMesh = new FaceMesh({
         locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`,
@@ -41,20 +44,43 @@ export class GazeTracker {
 
       this.faceMesh.onResults((results) => this._processResults(results))
 
-      this.camera = new Camera(videoElement, {
-        onFrame: async () => {
-          if (this.examActive && this.faceMesh) {
-            await this.faceMesh.send({ image: videoElement })
-          }
-        },
-        width: 320,
-        height: 240,
-      })
-
-      await this.camera.start()
+      // Wait for video to be ready before starting frame loop
+      if (videoElement.readyState >= 2) {
+        this._startFrameLoop()
+      } else {
+        videoElement.addEventListener('loadeddata', () => this._startFrameLoop(), { once: true })
+        // Fallback: start after 3s even if loadeddata doesn't fire
+        setTimeout(() => {
+          if (!this.animFrameId && this.examActive) this._startFrameLoop()
+        }, 3000)
+      }
     } catch (err) {
+      console.error('[GazeTracker] Failed to initialize:', err)
       onViolation({ type: 'gaze_tracker_unavailable', severity: 1, message: err.message })
     }
+  }
+
+  _startFrameLoop() {
+    if (this.animFrameId) return
+    console.log('[GazeTracker] Frame loop started')
+    this._tick()
+  }
+
+  _tick() {
+    if (!this.examActive) return
+    this.animFrameId = requestAnimationFrame(() => this._tick())
+
+    const now = Date.now()
+    if (now - this.lastFrameTime < this.FRAME_INTERVAL_MS) return
+    this.lastFrameTime = now
+
+    if (this.processing) return
+    if (!this.videoEl || this.videoEl.readyState < 2) return
+
+    this.processing = true
+    this.faceMesh.send({ image: this.videoEl })
+      .then(() => { this.processing = false })
+      .catch(() => { this.processing = false })
   }
 
   _isInCooldown() {
@@ -116,6 +142,9 @@ export class GazeTracker {
 
   stop() {
     this.examActive = false
-    try { this.camera?.stop() } catch (_) {}
+    if (this.animFrameId) {
+      cancelAnimationFrame(this.animFrameId)
+      this.animFrameId = null
+    }
   }
 }

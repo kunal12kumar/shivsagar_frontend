@@ -9,7 +9,6 @@ const BLOCKED_CTRL_KEYS = ['c', 'x', 'v', 'a', 'u', 's', 'p', 'f']
 
 const IS_DEV = process.env.NODE_ENV === 'development'
 
-// Per-type cooldowns (ms) — prevents flooding from rapid-fire events
 const TYPE_COOLDOWNS = {
   right_click:        3000,
   tab_switch:         5000,
@@ -29,7 +28,7 @@ const TYPE_COOLDOWNS = {
 const DEFAULT_COOLDOWN = 2000
 
 export default function AntiCheatWrapper({ children, examId }) {
-  const [showFullscreenPrompt, setShowFullscreenPrompt] = useState(false)
+  const [fullscreenActive, setFullscreenActive] = useState(false)
   const [showMonitorBlock, setShowMonitorBlock] = useState(false)
   const addViolation     = useExamStore(s => s.addViolation)
   const setIntegrityScore = useExamStore(s => s.setIntegrityScore)
@@ -38,9 +37,8 @@ export default function AntiCheatWrapper({ children, examId }) {
   const candidateId      = useExamStore(s => s.candidateId)
   const blurTimeRef      = useRef(null)
   const cooldownRef      = useRef({})
-  // Track whether a blur event already fired tab_hidden, so focus handler
-  // doesn't double-count with a separate tab_switch for the same event.
   const blurHandledRef   = useRef(false)
+  const fsRequestedRef   = useRef(false)
 
   const sendViolation = useCallback((type, severity = 2) => {
     const now = Date.now()
@@ -53,34 +51,43 @@ export default function AntiCheatWrapper({ children, examId }) {
     addViolation(v)
     wsClient.sendViolation(v)
 
-    // REST API — primary path; use response to update integrity score
     reportViolation(examId, { type, severity })
       .then(res => {
         if (res?.data?.integrity_score !== undefined) {
           setIntegrityScore(res.data.integrity_score)
         }
       })
-      .catch(() => {})
+      .catch(err => {
+        console.error('[AntiCheat] reportViolation failed:', err?.response?.status, err?.message)
+      })
   }, [addViolation, setIntegrityScore, examId])
 
-  // Request fullscreen on mount
-  useEffect(() => {
-    if (examStatus !== 'active') return
-    document.documentElement.requestFullscreen?.().catch(() => {})
-  }, [examStatus])
+  const enterFullscreen = useCallback(() => {
+    const el = document.documentElement
+    const request = el.requestFullscreen || el.webkitRequestFullscreen || el.msRequestFullscreen
+    if (request) {
+      request.call(el).then(() => {
+        setFullscreenActive(true)
+        fsRequestedRef.current = true
+      }).catch(() => {})
+    }
+  }, [])
 
-  // Detect fullscreen exit
+  // Detect fullscreen changes
   useEffect(() => {
     const handleFSChange = () => {
-      if (!document.fullscreenElement && examStatus === 'active') {
-        setShowFullscreenPrompt(true)
+      const isFS = !!(document.fullscreenElement || document.webkitFullscreenElement)
+      setFullscreenActive(isFS)
+      if (!isFS && fsRequestedRef.current && examStatus === 'active') {
         sendViolation('fullscreen_exit', 3)
-      } else {
-        setShowFullscreenPrompt(false)
       }
     }
     document.addEventListener('fullscreenchange', handleFSChange)
-    return () => document.removeEventListener('fullscreenchange', handleFSChange)
+    document.addEventListener('webkitfullscreenchange', handleFSChange)
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFSChange)
+      document.removeEventListener('webkitfullscreenchange', handleFSChange)
+    }
   }, [examStatus, sendViolation])
 
   // Tab / window blur detection — deduplicated so blur+visibilitychange
@@ -209,8 +216,16 @@ export default function AntiCheatWrapper({ children, examId }) {
     left: `${(i % 5) * 20 + 2}%`,
   }))
 
+  const showFullscreenPrompt = examStatus === 'active' && !fullscreenActive
+
   return (
-    <div className="exam-mode relative">
+    <div
+      className="exam-mode relative"
+      style={{ userSelect: 'none', WebkitUserSelect: 'none', MozUserSelect: 'none' }}
+      onCopy={e => e.preventDefault()}
+      onCut={e => e.preventDefault()}
+      onPaste={e => e.preventDefault()}
+    >
       {children}
 
       {/* Candidate watermark */}
@@ -234,20 +249,24 @@ export default function AntiCheatWrapper({ children, examId }) {
         ))}
       </div>
 
-      {/* Fullscreen prompt overlay */}
+      {/* Fullscreen prompt — shown on first load (user gesture required) and on exit */}
       {showFullscreenPrompt && (
         <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center">
           <div className="bg-white rounded-2xl p-8 max-w-md text-center shadow-2xl">
-            <div className="text-4xl mb-4">⚠️</div>
-            <h2 className="text-xl font-bold text-slate-800 mb-3">Fullscreen Required</h2>
+            <div className="text-4xl mb-4">{fsRequestedRef.current ? '⚠️' : '🔒'}</div>
+            <h2 className="text-xl font-bold text-slate-800 mb-3">
+              {fsRequestedRef.current ? 'Return to Fullscreen' : 'Fullscreen Required'}
+            </h2>
             <p className="text-slate-500 mb-6 text-sm leading-relaxed">
-              You exited fullscreen mode. This has been recorded as a violation. Please return to fullscreen to continue your exam.
+              {fsRequestedRef.current
+                ? 'You exited fullscreen mode. This has been recorded as a violation. Click below to return to fullscreen.'
+                : 'This exam must be taken in fullscreen mode. Click below to enter fullscreen and begin.'}
             </p>
             <button
-              onClick={() => document.documentElement.requestFullscreen?.()}
+              onClick={enterFullscreen}
               className="bg-indigo-600 text-white px-6 py-3 rounded-lg font-medium hover:bg-indigo-700 transition-colors"
             >
-              Return to Fullscreen
+              {fsRequestedRef.current ? 'Return to Fullscreen' : 'Enter Fullscreen'}
             </button>
           </div>
         </div>

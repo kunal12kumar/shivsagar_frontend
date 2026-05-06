@@ -37,10 +37,16 @@ body {
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
 }
 
-/* Prevent text selection during exam */
+/* Prevent text selection, copy, and drag during exam */
+.exam-mode,
+.exam-mode * {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+  -moz-user-select: none !important;
+  -webkit-touch-callout: none !important;
+}
 .exam-mode {
-  user-select: none;
-  -webkit-user-select: none;
+  -webkit-user-drag: none;
 }
 
 /* Scrollbar styling */

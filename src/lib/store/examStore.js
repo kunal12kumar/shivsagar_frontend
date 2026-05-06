@@ -170,6 +170,9 @@ const useExamStore = create(
         // Persist submission state per-exam so a new exam can still be attempted
         examStatus: state.examStatus,
         submittedExamId: state.submittedExamId,
+        // Persist proctoring state so score/violations survive refresh
+        integrityScore: state.integrityScore,
+        violations: state.violations,
       }),
     }
   )

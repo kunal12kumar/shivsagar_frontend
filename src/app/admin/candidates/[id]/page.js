@@ -308,9 +308,11 @@ export default function CandidateAuditPage() {
         getLiveScores(examId),
       ])
 
+      let candidateRecord = null
       if (candRes.status === 'fulfilled') {
         const found = candRes.value.data.find((c) => c.id === candidateId)
         setCandidate(found || null)
+        candidateRecord = found || null
       }
 
       if (violRes.status === 'fulfilled') {
@@ -321,9 +323,16 @@ export default function CandidateAuditPage() {
         setSnapshots(snapRes.value.data?.snapshots || [])
       }
 
+      // Score: prefer live Redis score, fall back to MySQL candidate.integrity_score
       if (scoresRes.status === 'fulfilled') {
-        const sc = scoresRes.value.data?.scores?.[String(candidateId)]
-        if (sc !== undefined) setScore(sc)
+        const redisScore = scoresRes.value.data?.scores?.[String(candidateId)]
+        if (redisScore !== undefined && redisScore > 0) {
+          setScore(redisScore)
+        } else if (candidateRecord?.integrity_score > 0) {
+          setScore(candidateRecord.integrity_score)
+        }
+      } else if (candidateRecord?.integrity_score > 0) {
+        setScore(candidateRecord.integrity_score)
       }
     } catch (err) {
       setError('Failed to load candidate data.')

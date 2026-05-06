@@ -283,16 +283,17 @@ export default function ExamPage() {
     if (proctoringStarted.current) return
     proctoringStarted.current = true
 
-    // Central violation reporter — sends to both REST (authoritative) and WS (best-effort)
     const sendProctoringViolation = (violation) => {
       addViolation(violation)
-      reportViolation(examId, { type: violation.type, severity: violation.severity })
+      reportViolation(examId, { type: violation.type, severity: violation.severity || 2 })
         .then(res => {
           if (res?.data?.integrity_score !== undefined) {
             setIntegrityScore(res.data.integrity_score)
           }
         })
-        .catch(() => {})
+        .catch(err => {
+          console.error('[Proctoring] reportViolation failed:', err?.response?.status, err?.message)
+        })
       wsClient.sendViolation({ ...violation, examId, candidateId })
     }
 
@@ -303,24 +304,27 @@ export default function ExamPage() {
 
     // ── Snapshot Worker + Gaze Tracker (both need webcam) ────────────────────
     navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 } })
-      .then((stream) => {
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream
-          videoRef.current.play()
-        }
+      .then(async (stream) => {
+        const video = videoRef.current
+        if (!video) return
+
+        video.srcObject = stream
+        video.muted = true
+        video.playsInline = true
+        await video.play()
 
         // Snapshot worker — captures JPEG every 2 min and uploads to S3
         const sw = new SnapshotWorker()
         snapshotWorkerRef.current = sw
-        sw.start(videoRef.current, examId, candidateId)
+        sw.start(video, examId, candidateId)
 
         // Gaze tracker — MediaPipe FaceMesh, detects look-away > 3s
         const gt = new GazeTracker()
         gazeTrackerRef.current = gt
-        gt.start(videoRef.current, sendProctoringViolation)
+        gt.start(video, sendProctoringViolation)
       })
-      .catch(() => {
-        // Webcam unavailable mid-exam — flag but continue
+      .catch((err) => {
+        console.error('[Proctoring] Webcam access failed:', err)
         sendProctoringViolation({ type: 'camera_unavailable', severity: 3 })
       })
 
