@@ -10,6 +10,7 @@ import { useRouter } from 'next/navigation'
 import useExamStore from '@/lib/store/examStore'
 import wsClient from '@/lib/ws/wsClient'
 import AntiCheatWrapper from '@/components/exam/AntiCheatWrapper'
+import ViolationWarningBanner from '@/components/exam/ViolationWarningBanner'
 import QuestionPanel from '@/components/exam/QuestionPanel'
 import QuestionGrid from '@/components/exam/QuestionGrid'
 import ExamTimer from '@/components/exam/ExamTimer'
@@ -285,7 +286,13 @@ export default function ExamPage() {
     // Central violation reporter — sends to both REST (authoritative) and WS (best-effort)
     const sendProctoringViolation = (violation) => {
       addViolation(violation)
-      reportViolation(examId, { type: violation.type, severity: violation.severity }).catch(() => {})
+      reportViolation(examId, { type: violation.type, severity: violation.severity })
+        .then(res => {
+          if (res?.data?.integrity_score !== undefined) {
+            setIntegrityScore(res.data.integrity_score)
+          }
+        })
+        .catch(() => {})
       wsClient.sendViolation({ ...violation, examId, candidateId })
     }
 
@@ -323,7 +330,7 @@ export default function ExamPage() {
       snapshotWorkerRef.current?.stop()
       gazeTrackerRef.current?.stop()
     }
-  }, [examLoaded, examId, candidateId, addViolation])
+  }, [examLoaded, examId, candidateId, addViolation, setIntegrityScore])
 
   // Load ALL questions once the countdown finishes
   useEffect(() => {
@@ -436,6 +443,7 @@ export default function ExamPage() {
 
   return (
     <AntiCheatWrapper examId={examId}>
+      <ViolationWarningBanner />
       <div className="h-screen flex flex-col overflow-hidden" style={{ background: '#f1f5f9' }}>
 
         {/* ── Top bar ───────────────────────────────────────────────────────── */}

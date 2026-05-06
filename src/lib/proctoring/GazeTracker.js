@@ -1,11 +1,7 @@
 /**
  * GazeTracker — uses MediaPipe FaceMesh (WASM, runs entirely in the browser).
- * Loads MediaPipe from CDN. Zero server cost.
  * Detects look-away events: if candidate's gaze deviates for > 3 seconds → violation.
- * Runs at 10fps (sufficient for exam proctoring, low CPU impact).
- *
- * NOTE: MediaPipe WASM is loaded dynamically. Internet required on first load.
- * After first load it's cached by the browser.
+ * Runs at 10fps. After firing a violation, enters a 15-second cooldown to prevent flooding.
  */
 export class GazeTracker {
   constructor() {
@@ -13,9 +9,14 @@ export class GazeTracker {
     this.camera = null
     this.lookAwayStart = null
     this.examActive = false
-    this.LOOK_AWAY_THRESHOLD_MS = 3000 // 3 seconds off-screen = violation
     this.onViolation = null
     this.videoEl = null
+
+    this.LOOK_AWAY_THRESHOLD_MS = 3000
+    this.VIOLATION_COOLDOWN_MS = 15000
+    this.GAZE_X_THRESHOLD = 0.15
+    this.GAZE_Y_THRESHOLD = 0.12
+    this.lastViolationTime = 0
   }
 
   async start(videoElement, onViolation) {
@@ -24,7 +25,6 @@ export class GazeTracker {
     this.examActive = true
 
     try {
-      // Dynamic import of MediaPipe — loaded from CDN
       const { FaceMesh } = await import('@mediapipe/face_mesh')
       const { Camera } = await import('@mediapipe/camera_utils')
 
@@ -57,50 +57,59 @@ export class GazeTracker {
     }
   }
 
+  _isInCooldown() {
+    return (Date.now() - this.lastViolationTime) < this.VIOLATION_COOLDOWN_MS
+  }
+
+  _fireViolation(duration) {
+    this.lastViolationTime = Date.now()
+    this.lookAwayStart = null
+    this.onViolation?.({
+      type: 'gaze_deviation',
+      severity: 3,
+      duration_ms: duration,
+      timestamp: new Date().toISOString(),
+    })
+  }
+
   _processResults(results) {
+    if (!this.examActive) return
+    if (this._isInCooldown()) {
+      this.lookAwayStart = null
+      return
+    }
+
     if (!results.multiFaceLandmarks || results.multiFaceLandmarks.length === 0) {
-      // No face detected
       if (!this.lookAwayStart) this.lookAwayStart = Date.now()
       const duration = Date.now() - this.lookAwayStart
       if (duration > this.LOOK_AWAY_THRESHOLD_MS) {
-        this.onViolation?.({
-          type: 'gaze_deviation',
-          severity: 3,
-          duration_ms: duration,
-          timestamp: new Date().toISOString(),
-        })
-        this.lookAwayStart = null
+        this._fireViolation(duration)
       }
       return
     }
 
-    // Face detected — check iris position for gaze direction
     const landmarks = results.multiFaceLandmarks[0]
-    // Iris landmarks: 474-477 (left), 469-472 (right)
-    const leftIris = landmarks[473] // left iris center
-    const rightIris = landmarks[468] // right iris center
-    const noseTip = landmarks[1]
+    const leftIris  = landmarks[473]
+    const rightIris = landmarks[468]
+    const noseTip   = landmarks[1]
 
-    // Simple heuristic: if iris x is far from nose center, candidate is looking away
-    const leftOffset = Math.abs(leftIris.x - noseTip.x)
-    const rightOffset = Math.abs(rightIris.x - noseTip.x)
-    const avgOffset = (leftOffset + rightOffset) / 2
+    const xOffsetL = Math.abs(leftIris.x - noseTip.x)
+    const xOffsetR = Math.abs(rightIris.x - noseTip.x)
+    const avgXOffset = (xOffsetL + xOffsetR) / 2
 
-    if (avgOffset > 0.15) {
-      // Looking significantly to the side
+    const yOffsetL = Math.abs(leftIris.y - noseTip.y)
+    const yOffsetR = Math.abs(rightIris.y - noseTip.y)
+    const avgYOffset = (yOffsetL + yOffsetR) / 2
+
+    const isLookingAway = avgXOffset > this.GAZE_X_THRESHOLD || avgYOffset > this.GAZE_Y_THRESHOLD
+
+    if (isLookingAway) {
       if (!this.lookAwayStart) this.lookAwayStart = Date.now()
       const duration = Date.now() - this.lookAwayStart
       if (duration > this.LOOK_AWAY_THRESHOLD_MS) {
-        this.onViolation?.({
-          type: 'gaze_deviation',
-          severity: 3,
-          duration_ms: duration,
-          timestamp: new Date().toISOString(),
-        })
-        this.lookAwayStart = null
+        this._fireViolation(duration)
       }
     } else {
-      // Looking at screen — reset timer
       this.lookAwayStart = null
     }
   }
