@@ -47,10 +47,13 @@ export const adminMe      = ()        => adminClient.get('/admin/auth/me')
 export const getCandidates   = (examId = null) =>
   adminClient.get(examId != null ? `/admin/candidates?exam_id=${examId}` : '/admin/candidates')
 export const addCandidate    = (data)       => adminClient.post('/admin/candidates', data)
-export const bulkImportCandidates = (file, examId = 1) => {
+export const bulkImportCandidates = (file, examId = null) => {
   const form = new FormData()
   form.append('file', file)
-  return adminClient.post(`/admin/candidates/bulk?exam_id=${examId}`, form, {
+  const url = examId != null
+    ? `/admin/candidates/bulk?exam_id=${examId}`
+    : '/admin/candidates/bulk'
+  return adminClient.post(url, form, {
     headers: { 'Content-Type': 'multipart/form-data' },
   })
 }

@@ -565,10 +565,6 @@ export default function AdminDashboard() {
   const handleAddCandidate = async (e) => {
     e.preventDefault()
     const { application_number, name, email } = addForm
-    if (!registrationExamId) {
-      toast.error('Select an exam from the dropdown above before adding candidates')
-      return
-    }
     if (!application_number.trim() || !name.trim() || !email.trim()) {
       toast.error('Application Number, Name and Email are required')
       return
@@ -580,7 +576,7 @@ export default function AdminDashboard() {
         application_number: application_number.trim(),
         name: name.trim(),
         email: email.trim(),
-        exam_id: registrationExamId,
+        ...(registrationExamId            && { exam_id:        registrationExamId }),
         ...(addForm.father_name.trim()    && { father_name:    addForm.father_name.trim() }),
         ...(addForm.phone.trim()          && { phone:          addForm.phone.trim() }),
         ...(addForm.date_of_birth.trim()  && { date_of_birth:  addForm.date_of_birth.trim() }),
@@ -601,7 +597,8 @@ export default function AdminDashboard() {
         photo_indexed: false,
       }])
       setAddForm(EMPTY_ADD_FORM)
-      toast.success(`✓ ${res.data.name} added — Roll: ${res.data.roll_number}`, { id: toastId })
+      const rollInfo = res.data.roll_number ? ` — Roll: ${res.data.roll_number}` : ' (roll assigned when exam goes live)'
+      toast.success(`✓ ${res.data.name} added${rollInfo}`, { id: toastId })
     } catch (err) {
       toast.error(err.response?.data?.detail || 'Failed to add candidate', { id: toastId })
     } finally {
@@ -1106,7 +1103,7 @@ export default function AdminDashboard() {
             <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-xl flex flex-wrap items-center gap-3">
               <div className="flex items-center gap-2 flex-shrink-0">
                 <span className="text-blue-700 text-sm">📋</span>
-                <span className="text-sm font-semibold text-blue-800">Register candidates into exam:</span>
+                <span className="text-sm font-semibold text-blue-800">Assign to exam <span className="font-normal text-blue-500">(optional — can assign later)</span>:</span>
               </div>
               {examLoading ? (
                 <span className="text-xs text-blue-600 italic">Loading exams…</span>
@@ -1140,15 +1137,14 @@ export default function AdminDashboard() {
                     Retry
                   </button>
                 </span>
-              ) : allExams.length === 0 ? (
-                <span className="text-xs text-blue-600 italic">No exams found — create an exam first.</span>
               ) : (
                 <select
                   value={registrationExamId ?? ''}
-                  onChange={e => setRegistrationExamId(Number(e.target.value))}
+                  onChange={e => setRegistrationExamId(e.target.value ? Number(e.target.value) : null)}
                   className="px-3 py-1.5 border border-blue-300 rounded-lg text-sm font-medium
                              bg-white text-blue-900 focus:outline-none focus:ring-2 focus:ring-blue-400"
                 >
+                  <option value="">— No exam (assign later) —</option>
                   {allExams.map(ex => (
                     <option key={ex.id} value={ex.id}>
                       #{ex.id} — {ex.title} [{ex.status?.toUpperCase()}]
@@ -1156,11 +1152,11 @@ export default function AdminDashboard() {
                   ))}
                 </select>
               )}
-              {registrationExamId && (
-                <span className="text-xs text-blue-600 ml-auto">
-                  Candidates added below will be assigned to Exam #{registrationExamId}
-                </span>
-              )}
+              <span className="text-xs text-blue-600 ml-auto">
+                {registrationExamId
+                  ? `Candidates will be assigned to Exam #${registrationExamId}`
+                  : 'Candidates will be registered without an exam — roll number assigned later'}
+              </span>
             </div>
 
             {/* Toggle */}
