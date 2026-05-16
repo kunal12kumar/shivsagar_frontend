@@ -223,10 +223,15 @@ export default function AdminDashboard() {
 
   // ── Active exam state (replaces hardcoded EXAM_ID = 1)
   const [activeExam,   setActiveExam]   = useState(null)   // full exam object
+  const [allExams,     setAllExams]     = useState([])     // all exams for picker
   const [examLoading,  setExamLoading]  = useState(true)
 
   // Derived: always use the active exam's ID (fallback to 1 for safety)
   const EXAM_ID = activeExam?.id ?? 1
+
+  // ── Students tab: separate exam picker (independent of the monitored exam)
+  // Defaults to the active/latest exam once loaded; admin can change per-registration.
+  const [registrationExamId, setRegistrationExamId] = useState(null)
 
   // ── Data state
   const [candidates, setCandidates] = useState([])
@@ -289,11 +294,13 @@ export default function AdminDashboard() {
     listExams()
       .then(({ data }) => {
         const exams = data || []
+        setAllExams(exams)
         const active = exams.find(e => e.status === 'active')
           || exams.find(e => e.status === 'paused')
           || exams[0]   // most recent (list is ordered by created_at desc)
         if (active) {
           setActiveExam(active)
+          setRegistrationExamId(active.id)  // default registration exam = most relevant exam
           // Auto-mark as COMPLETED if end_time has passed
           if (active.end_time && new Date(active.end_time) < new Date() && active.status === 'active') {
             endExam(active.id).catch(() => {})  // silent — server will mark it
@@ -554,6 +561,10 @@ export default function AdminDashboard() {
   const handleAddCandidate = async (e) => {
     e.preventDefault()
     const { application_number, name, email } = addForm
+    if (!registrationExamId) {
+      toast.error('Select an exam from the dropdown above before adding candidates')
+      return
+    }
     if (!application_number.trim() || !name.trim() || !email.trim()) {
       toast.error('Application Number, Name and Email are required')
       return
@@ -565,7 +576,7 @@ export default function AdminDashboard() {
         application_number: application_number.trim(),
         name: name.trim(),
         email: email.trim(),
-        exam_id: EXAM_ID,
+        exam_id: registrationExamId,
         ...(addForm.father_name.trim()    && { father_name:    addForm.father_name.trim() }),
         ...(addForm.phone.trim()          && { phone:          addForm.phone.trim() }),
         ...(addForm.date_of_birth.trim()  && { date_of_birth:  addForm.date_of_birth.trim() }),
@@ -600,7 +611,7 @@ export default function AdminDashboard() {
     setBulkResult(null)
     const toastId = toast.loading(`Importing ${bulkFile.name}…`)
     try {
-      const res = await bulkImportCandidates(bulkFile, EXAM_ID)
+      const res = await bulkImportCandidates(bulkFile, registrationExamId)
       setBulkResult(res.data)
       // Refresh candidate list so new rows appear immediately
       const cRes = await getCandidates()
@@ -1087,6 +1098,35 @@ export default function AdminDashboard() {
               </div>
             </div>
 
+            {/* ── Exam selector for registration ─────────────────────── */}
+            <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-xl flex flex-wrap items-center gap-3">
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <span className="text-blue-700 text-sm">📋</span>
+                <span className="text-sm font-semibold text-blue-800">Register candidates into exam:</span>
+              </div>
+              {allExams.length === 0 ? (
+                <span className="text-xs text-blue-600 italic">Loading exams…</span>
+              ) : (
+                <select
+                  value={registrationExamId ?? ''}
+                  onChange={e => setRegistrationExamId(Number(e.target.value))}
+                  className="px-3 py-1.5 border border-blue-300 rounded-lg text-sm font-medium
+                             bg-white text-blue-900 focus:outline-none focus:ring-2 focus:ring-blue-400"
+                >
+                  {allExams.map(ex => (
+                    <option key={ex.id} value={ex.id}>
+                      #{ex.id} — {ex.title} [{ex.status?.toUpperCase()}]
+                    </option>
+                  ))}
+                </select>
+              )}
+              {registrationExamId && (
+                <span className="text-xs text-blue-600 ml-auto">
+                  Candidates added below will be assigned to Exam #{registrationExamId}
+                </span>
+              )}
+            </div>
+
             {/* Toggle */}
             <div className="flex gap-2">
               <button
@@ -1260,7 +1300,7 @@ export default function AdminDashboard() {
                     Clear
                   </button>
                   <span className="text-xs text-exam-muted ml-auto">
-                    Exam ID: <strong>{EXAM_ID}</strong>
+                    Exam ID: <strong className="text-exam-blue">{registrationExamId ?? '—'}</strong>
                   </span>
                 </div>
               </form>
