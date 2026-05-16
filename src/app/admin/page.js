@@ -251,7 +251,10 @@ export default function AdminDashboard() {
 
   // ── Students tab state ────────────────────────────────────────────────
   const [studentsMode, setStudentsMode] = useState('add')   // 'add' | 'bulk'
-  const [addForm, setAddForm]           = useState({ roll_number: '', name: '', email: '' })
+  const [addForm, setAddForm]           = useState({
+    application_number: '', name: '', email: '',
+    father_name: '', phone: '', date_of_birth: '', gender: '', category: '', state: '',
+  })
   const [addLoading, setAddLoading]     = useState(false)
   const [bulkFile, setBulkFile]         = useState(null)    // File object
   const [bulkLoading, setBulkLoading]   = useState(false)
@@ -543,29 +546,47 @@ export default function AdminDashboard() {
   }
 
   // ── Students handlers ─────────────────────────────────────────────────
+  const EMPTY_ADD_FORM = {
+    application_number: '', name: '', email: '',
+    father_name: '', phone: '', date_of_birth: '', gender: '', category: '', state: '',
+  }
+
   const handleAddCandidate = async (e) => {
     e.preventDefault()
-    const { roll_number, name, email } = addForm
-    if (!roll_number.trim() || !name.trim() || !email.trim()) {
-      toast.error('All fields are required')
+    const { application_number, name, email } = addForm
+    if (!application_number.trim() || !name.trim() || !email.trim()) {
+      toast.error('Application Number, Name and Email are required')
       return
     }
     setAddLoading(true)
     const toastId = toast.loading('Adding candidate…')
     try {
-      const res = await addCandidate({ roll_number: roll_number.trim(), name: name.trim(), email: email.trim(), exam_id: EXAM_ID })
+      const payload = {
+        application_number: application_number.trim(),
+        name: name.trim(),
+        email: email.trim(),
+        exam_id: EXAM_ID,
+        ...(addForm.father_name.trim()    && { father_name:    addForm.father_name.trim() }),
+        ...(addForm.phone.trim()          && { phone:          addForm.phone.trim() }),
+        ...(addForm.date_of_birth.trim()  && { date_of_birth:  addForm.date_of_birth.trim() }),
+        ...(addForm.gender                && { gender:          addForm.gender }),
+        ...(addForm.category              && { category:        addForm.category }),
+        ...(addForm.state.trim()          && { state:           addForm.state.trim() }),
+      }
+      const res = await addCandidate(payload)
       setCandidates(prev => [...prev, {
         id: res.data.id,
         name: res.data.name,
         roll_number: res.data.roll_number,
+        application_number: res.data.application_number,
         email: res.data.email,
         connected: false,
         integrity_score: 0,
         violation_count: 0,
         photo_indexed: false,
       }])
-      setAddForm({ roll_number: '', name: '', email: '' })
-      toast.success(`✓ ${res.data.name} added (ID #${res.data.id})`, { id: toastId })
+      setAddForm(EMPTY_ADD_FORM)
+      toast.success(`✓ ${res.data.name} added — Roll: ${res.data.roll_number}`, { id: toastId })
     } catch (err) {
       toast.error(err.response?.data?.detail || 'Failed to add candidate', { id: toastId })
     } finally {
@@ -598,7 +619,7 @@ export default function AdminDashboard() {
 
   const handleDeleteCandidate = async (candidate) => {
     if (!await confirmToast(
-      `Delete ${candidate.name} (${candidate.roll_number})? This removes all their answers, violations and results. Irreversible.`,
+      `Delete ${candidate.name} (Roll: ${candidate.roll_number})? This removes all their answers, violations and results. Irreversible.`,
       { danger: true }
     )) return
     const toastId = toast.loading('Deleting…')
@@ -1096,17 +1117,22 @@ export default function AdminDashboard() {
           {/* ── Add Single form ────────────────────────────────────────── */}
           {studentsMode === 'add' && (
             <div className="bg-white rounded-2xl border border-exam-border p-6">
-              <h3 className="font-semibold text-exam-text mb-4">Add New Candidate</h3>
+              <h3 className="font-semibold text-exam-text mb-1">Add New Candidate</h3>
+              <p className="text-xs text-exam-muted mb-4">
+                Roll number is <strong>auto-generated</strong> by the system. Fields marked <span className="text-red-500">*</span> are required.
+              </p>
               <form onSubmit={handleAddCandidate} className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+
+                {/* Row 1 — required fields */}
                 <div>
                   <label className="block text-xs font-semibold text-exam-muted mb-1 uppercase tracking-wide">
-                    Roll Number <span className="text-red-500">*</span>
+                    Application Number <span className="text-red-500">*</span>
                   </label>
                   <input
                     type="text"
-                    placeholder="e.g. DAT2026001"
-                    value={addForm.roll_number}
-                    onChange={e => setAddForm(f => ({ ...f, roll_number: e.target.value }))}
+                    placeholder="e.g. APP260001"
+                    value={addForm.application_number}
+                    onChange={e => setAddForm(f => ({ ...f, application_number: e.target.value }))}
                     className="w-full px-3 py-2 border border-exam-border rounded-xl text-sm
                                focus:outline-none focus:ring-2 focus:ring-exam-blue focus:border-exam-blue"
                     required
@@ -1118,7 +1144,7 @@ export default function AdminDashboard() {
                   </label>
                   <input
                     type="text"
-                    placeholder="e.g. Kunal Kumar"
+                    placeholder="e.g. Rahul Kumar Singh"
                     value={addForm.name}
                     onChange={e => setAddForm(f => ({ ...f, name: e.target.value }))}
                     className="w-full px-3 py-2 border border-exam-border rounded-xl text-sm
@@ -1132,7 +1158,7 @@ export default function AdminDashboard() {
                   </label>
                   <input
                     type="email"
-                    placeholder="e.g. kunal@example.com"
+                    placeholder="e.g. rahul@example.com"
                     value={addForm.email}
                     onChange={e => setAddForm(f => ({ ...f, email: e.target.value }))}
                     className="w-full px-3 py-2 border border-exam-border rounded-xl text-sm
@@ -1140,6 +1166,83 @@ export default function AdminDashboard() {
                     required
                   />
                 </div>
+
+                {/* Row 2 — admit card fields */}
+                <div>
+                  <label className="block text-xs font-semibold text-exam-muted mb-1 uppercase tracking-wide">Father&apos;s Name</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Rajesh Kumar Singh"
+                    value={addForm.father_name}
+                    onChange={e => setAddForm(f => ({ ...f, father_name: e.target.value }))}
+                    className="w-full px-3 py-2 border border-exam-border rounded-xl text-sm
+                               focus:outline-none focus:ring-2 focus:ring-exam-blue focus:border-exam-blue"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-exam-muted mb-1 uppercase tracking-wide">Phone</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. 9876543210"
+                    value={addForm.phone}
+                    onChange={e => setAddForm(f => ({ ...f, phone: e.target.value }))}
+                    className="w-full px-3 py-2 border border-exam-border rounded-xl text-sm
+                               focus:outline-none focus:ring-2 focus:ring-exam-blue focus:border-exam-blue"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-exam-muted mb-1 uppercase tracking-wide">
+                    Date of Birth <span className="text-xs text-exam-muted normal-case font-normal">(= exam password)</span>
+                  </label>
+                  <input
+                    type="date"
+                    value={addForm.date_of_birth}
+                    onChange={e => setAddForm(f => ({ ...f, date_of_birth: e.target.value }))}
+                    className="w-full px-3 py-2 border border-exam-border rounded-xl text-sm
+                               focus:outline-none focus:ring-2 focus:ring-exam-blue focus:border-exam-blue"
+                  />
+                </div>
+
+                {/* Row 3 — dropdowns + state */}
+                <div>
+                  <label className="block text-xs font-semibold text-exam-muted mb-1 uppercase tracking-wide">Gender</label>
+                  <select
+                    value={addForm.gender}
+                    onChange={e => setAddForm(f => ({ ...f, gender: e.target.value }))}
+                    className="w-full px-3 py-2 border border-exam-border rounded-xl text-sm
+                               focus:outline-none focus:ring-2 focus:ring-exam-blue focus:border-exam-blue bg-white"
+                  >
+                    <option value="">— Select —</option>
+                    <option>Male</option>
+                    <option>Female</option>
+                    <option>Other</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-exam-muted mb-1 uppercase tracking-wide">Category</label>
+                  <select
+                    value={addForm.category}
+                    onChange={e => setAddForm(f => ({ ...f, category: e.target.value }))}
+                    className="w-full px-3 py-2 border border-exam-border rounded-xl text-sm
+                               focus:outline-none focus:ring-2 focus:ring-exam-blue focus:border-exam-blue bg-white"
+                  >
+                    <option value="">— Select —</option>
+                    {['GEN','OBC','OBC-NCL','SC','ST','EWS','PwD'].map(c => <option key={c}>{c}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-exam-muted mb-1 uppercase tracking-wide">State</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Assam"
+                    value={addForm.state}
+                    onChange={e => setAddForm(f => ({ ...f, state: e.target.value }))}
+                    className="w-full px-3 py-2 border border-exam-border rounded-xl text-sm
+                               focus:outline-none focus:ring-2 focus:ring-exam-blue focus:border-exam-blue"
+                  />
+                </div>
+
+                {/* Actions */}
                 <div className="sm:col-span-3 flex items-center gap-3 pt-1">
                   <button
                     type="submit"
@@ -1151,7 +1254,7 @@ export default function AdminDashboard() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => setAddForm({ roll_number: '', name: '', email: '' })}
+                    onClick={() => setAddForm(EMPTY_ADD_FORM)}
                     className="px-4 py-2.5 text-sm text-exam-muted border border-exam-border rounded-xl hover:bg-gray-50 transition-colors"
                   >
                     Clear
@@ -1174,20 +1277,22 @@ export default function AdminDashboard() {
                   The file must have these column headers (exact, case-insensitive):
                 </p>
                 <div className="mt-2 flex gap-2 flex-wrap">
-                  {['roll_number', 'name', 'email'].map(col => (
-                    <code key={col} className="bg-blue-50 text-blue-700 border border-blue-200 px-2 py-0.5 rounded text-xs font-mono">
-                      {col}
+                  {['application_number','name','email','father_name','phone','date_of_birth','gender','category','state'].map((col, i) => (
+                    <code key={col} className={`border px-2 py-0.5 rounded text-xs font-mono ${i < 3 ? 'bg-blue-50 text-blue-700 border-blue-200' : 'bg-gray-50 text-gray-500 border-gray-200'}`}>
+                      {col}{i < 3 ? ' *' : ''}
                     </code>
                   ))}
                 </div>
+                <p className="text-xs text-exam-muted mt-1.5">
+                  Roll number is <strong>auto-generated</strong> — do not include a roll_number column. The exam is set by the upload endpoint.
+                </p>
               </div>
 
               {/* Template download hint */}
               <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs text-amber-800">
-                <strong>Template format (first 3 rows):</strong>
-                <pre className="mt-1 font-mono leading-relaxed">{`roll_number,name,email
-DAT2026001,Rahul Sharma,rahul@example.com
-DAT2026002,Priya Singh,priya@example.com`}</pre>
+                <strong>Template format (use the Excel template — first data row example):</strong>
+                <pre className="mt-1 font-mono leading-relaxed whitespace-pre-wrap">{`application_number,name,father_name,email,phone,date_of_birth,gender,category,state
+APP260001,Rahul Kumar Singh,Rajesh Kumar Singh,rahul@gmail.com,9876543210,2008-08-15,Male,GEN,Assam`}</pre>
               </div>
 
               {/* File picker */}
@@ -1258,7 +1363,7 @@ DAT2026002,Priya Singh,priya@example.com`}</pre>
                       <div className="space-y-1 max-h-32 overflow-y-auto">
                         {bulkResult.skipped_details.map((s, i) => (
                           <div key={i} className="text-xs text-amber-700 font-mono">
-                            Row {s.row} — {s.roll_number} — {s.reason}
+                            Row {s.row} — {s.application_number || s.roll_number} — {s.reason}
                           </div>
                         ))}
                       </div>
@@ -1272,7 +1377,7 @@ DAT2026002,Priya Singh,priya@example.com`}</pre>
                       <div className="space-y-1 max-h-40 overflow-y-auto">
                         {bulkResult.candidates.map((c) => (
                           <div key={c.id} className="text-xs text-green-700 font-mono">
-                            #{c.id} — {c.roll_number} — {c.name} — {c.email}
+                            #{c.id} — Roll: {c.roll_number} — App: {c.application_number} — {c.name}
                           </div>
                         ))}
                       </div>
@@ -1305,7 +1410,7 @@ DAT2026002,Priya Singh,priya@example.com`}</pre>
                 <table className="w-full text-sm">
                   <thead className="bg-gray-50 border-b border-exam-border">
                     <tr>
-                      {['#', 'Roll No', 'Name', 'Email', 'Photo', 'Exam Started', 'Action'].map(h => (
+                      {['#', 'Roll No (auto)', 'App No', 'Name', 'Email', 'Photo', 'Exam Started', 'Action'].map(h => (
                         <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-exam-muted uppercase tracking-wide">
                           {h}
                         </th>
@@ -1316,7 +1421,8 @@ DAT2026002,Priya Singh,priya@example.com`}</pre>
                     {candidates.map((c, i) => (
                       <tr key={c.id} className="hover:bg-gray-50 transition-colors">
                         <td className="px-4 py-3 text-xs text-exam-muted">{i + 1}</td>
-                        <td className="px-4 py-3 font-mono text-xs text-exam-text font-medium">{c.roll_number}</td>
+                        <td className="px-4 py-3 font-mono text-xs text-exam-blue font-bold">{c.roll_number}</td>
+                        <td className="px-4 py-3 font-mono text-xs text-exam-muted">{c.application_number || '—'}</td>
                         <td className="px-4 py-3 font-medium text-exam-text">{c.name}</td>
                         <td className="px-4 py-3 text-xs text-exam-muted">{c.email}</td>
                         <td className="px-4 py-3">
