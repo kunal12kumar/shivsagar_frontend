@@ -5,12 +5,38 @@
  * Does NOT use the local system clock as the source of truth — only for display.
  * Turns amber at 30 min remaining, red at 10 min remaining.
  * Auto-submits when time reaches 0.
+ * Shows toast warnings at 5 min, 1 min, and 30 sec remaining.
  */
 import { useState, useEffect, useCallback, useRef } from 'react'
 import useExamStore from '@/lib/store/examStore'
 import { clsx } from 'clsx'
 
-export default function ExamTimer({ onTimeUp }) {
+// serverTimeOffset: difference between server clock and local clock (ms).
+// Populated once on mount by calling GET /health and comparing Date headers.
+let _serverTimeOffsetMs = 0
+
+async function _syncServerTime() {
+  try {
+    const before = Date.now()
+    const res = await fetch('/health', { cache: 'no-store' })
+    const after = Date.now()
+    const serverDate = res.headers.get('date')
+    if (serverDate) {
+      const serverMs = new Date(serverDate).getTime()
+      const localMs = Math.round((before + after) / 2)
+      _serverTimeOffsetMs = serverMs - localMs
+    }
+  } catch {
+    // non-fatal — offset stays 0
+  }
+}
+
+// Call once at module load; repeated exams reuse the cached offset.
+_syncServerTime()
+
+const WARNING_MILESTONES = [5 * 60, 60, 30] // seconds
+
+export default function ExamTimer({ onTimeUp, onWarning }) {
   const serverEndTime = useExamStore((s) => s.serverEndTime)
   const isLowBandwidth = useExamStore((s) => s.isLowBandwidth)
   const [remaining, setRemaining] = useState(null) // seconds
@@ -19,10 +45,13 @@ export default function ExamTimer({ onTimeUp }) {
   // Prevents firing onTimeUp when the page loads with an already-expired
   // end_time (e.g. stale localStorage from a previous exam session).
   const startedPositive = useRef(false)
+  const firedWarnings = useRef(new Set())
 
   const calcRemaining = useCallback(() => {
     if (!serverEndTime) return null
-    const diff = Math.floor((new Date(serverEndTime) - Date.now()) / 1000)
+    // Adjust local clock by measured server offset so we match server time
+    const adjustedNow = Date.now() + _serverTimeOffsetMs
+    const diff = Math.floor((new Date(serverEndTime) - adjustedNow) / 1000)
     return Math.max(0, diff)
   }, [serverEndTime])
 
@@ -39,13 +68,26 @@ export default function ExamTimer({ onTimeUp }) {
     const tick = setInterval(() => {
       const r = calcRemaining()
       setRemaining(r)
+
+      // Milestone warnings (fire once each)
+      for (const milestone of WARNING_MILESTONES) {
+        if (r !== null && r <= milestone && !firedWarnings.current.has(milestone)) {
+          firedWarnings.current.add(milestone)
+          const label =
+            milestone >= 60
+              ? `${Math.round(milestone / 60)} minute${milestone >= 120 ? 's' : ''}`
+              : `${milestone} seconds`
+          onWarning?.(`⏰ ${label} remaining!`)
+        }
+      }
+
       if (r === 0 && startedPositive.current) {
         clearInterval(tick)
         onTimeUp?.()
       }
     }, 1000)
     return () => clearInterval(tick)
-  }, [calcRemaining, onTimeUp])
+  }, [calcRemaining, onTimeUp, onWarning])
 
   if (remaining === null) return null
 

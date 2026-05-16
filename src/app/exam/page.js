@@ -106,6 +106,64 @@ export default function ExamPage() {
   const [loadError, setLoadError] = useState(null)
   const [paused, setPaused] = useState(false)
   const [connectionStatus, setConnectionStatus] = useState('connecting')
+  const [toastMessage, setToastMessage] = useState(null) // { text, level: 'info'|'warn'|'error' }
+  const [syncingCount, setSyncingCount] = useState(0) // unsynced answers count
+
+  const showToast = useCallback((text, level = 'info', durationMs = 4000) => {
+    setToastMessage({ text, level })
+    setTimeout(() => setToastMessage(null), durationMs)
+  }, [])
+
+  // LocalStorage key for unsynced answers (survives page reload/WS disconnect)
+  const _unsyncedKey = useCallback(
+    () => `exam_unsynced_${examId}`,
+    [examId]
+  )
+
+  const _markUnsynced = useCallback((qId, value) => {
+    try {
+      const raw = localStorage.getItem(_unsyncedKey()) || '{}'
+      const buf = JSON.parse(raw)
+      buf[qId] = { value, ts: Date.now(), synced: false }
+      localStorage.setItem(_unsyncedKey(), JSON.stringify(buf))
+      setSyncingCount(Object.values(buf).filter(v => !v.synced).length)
+    } catch {}
+  }, [_unsyncedKey])
+
+  const _markSynced = useCallback((qId) => {
+    try {
+      const raw = localStorage.getItem(_unsyncedKey()) || '{}'
+      const buf = JSON.parse(raw)
+      if (buf[qId]) {
+        buf[qId].synced = true
+        localStorage.setItem(_unsyncedKey(), JSON.stringify(buf))
+        setSyncingCount(Object.values(buf).filter(v => !v.synced).length)
+      }
+    } catch {}
+  }, [_unsyncedKey])
+
+  const _retryUnsynced = useCallback(async () => {
+    if (connectionStatus !== 'connected') return
+    try {
+      const raw = localStorage.getItem(_unsyncedKey()) || '{}'
+      const buf = JSON.parse(raw)
+      const pending = Object.entries(buf).filter(([, v]) => !v.synced)
+      if (!pending.length) return
+      for (const [qId, entry] of pending) {
+        let sent = false
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            wsClient.sendAnswer(qId, entry.value, examId)
+            sent = true
+            break
+          } catch {
+            await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt)))
+          }
+        }
+        if (!sent) break // WS is down, will retry on next interval
+      }
+    } catch {}
+  }, [connectionStatus, _unsyncedKey, examId])
 
   // 15-minute pre-exam countdown state
   const [countdownSecs, setCountdownSecs] = useState(null)  // null = not yet determined
@@ -249,6 +307,7 @@ export default function ExamPage() {
     })
     const offAck = wsClient.on('ANSWER_ACK', (msg) => {
       confirmAnswer(msg.questionId)
+      _markSynced(String(msg.questionId))
     })
     const offPause = wsClient.on('EXAM_PAUSED', () => setPaused(true))
     const offResume = wsClient.on('EXAM_RESUMED', () => setPaused(false))
@@ -256,6 +315,13 @@ export default function ExamPage() {
     const offTimeUpdate = wsClient.on('TIMER_SYNC', (msg) => {
       useExamStore.setState({ serverEndTime: msg.end_time })
     })
+    // Server is shutting down (ECS task draining) — reconnect immediately to a healthy task
+    const offShutdown = wsClient.on('SERVER_SHUTTING_DOWN', () => {
+      setConnectionStatus('reconnecting')
+      wsClient.disconnect()
+      setTimeout(() => wsClient.connect(jwt, examId, candidateId), 500)
+    })
+
     // Exam forcefully ended by controller — auto-submit and redirect
     const offEnded = wsClient.on('EXAM_ENDED', async () => {
       try {
@@ -271,7 +337,7 @@ export default function ExamPage() {
       cancelled = true
       offConnected(); offDisconnected(); offUnavailable(); offRecovered()
       offBulkSync(); offAck()
-      offPause(); offResume(); offScore(); offTimeUpdate(); offEnded()
+      offPause(); offResume(); offScore(); offTimeUpdate(); offEnded(); offShutdown()
     }
   }, [jwt, examId, candidateId])
 
@@ -349,6 +415,12 @@ export default function ExamPage() {
     })
   }, [countdownDone, examLoaded, setQuestions])
 
+  // Background sync: retry unsynced answers every 10s while connected
+  useEffect(() => {
+    const id = setInterval(_retryUnsynced, 10_000)
+    return () => clearInterval(id)
+  }, [_retryUnsynced])
+
   // Send pending answers to WS whenever answers state changes.
   // When WS is offline, immediately confirm locally so the "Saving…" spinner
   // doesn't persist — the answers are already in localStorage and will be
@@ -357,12 +429,16 @@ export default function ExamPage() {
   useEffect(() => {
     Object.entries(answerStatus).forEach(([qId, status]) => {
       if (status === 'pending') {
+        const ans = useExamStore.getState().answers[qId]
         if (connectionStatus === 'offline') {
           // No WS available — confirm locally; REST submit will persist these
+          if (ans !== undefined) _markUnsynced(qId, ans)
           confirmAnswer(qId)
         } else {
-          const ans = useExamStore.getState().answers[qId]
-          if (ans !== undefined) wsClient.sendAnswer(qId, ans, examId)
+          if (ans !== undefined) {
+            _markUnsynced(qId, ans)
+            wsClient.sendAnswer(qId, ans, examId)
+          }
         }
       }
     })
@@ -480,7 +556,10 @@ export default function ExamPage() {
           {/* Right: timer + name + submit */}
           <div className="flex items-center gap-4">
             {/* Timer — ExamTimer has its own colored background */}
-            <ExamTimer onTimeUp={() => setShowSubmitDialog(true)} />
+            <ExamTimer
+              onTimeUp={() => setShowSubmitDialog(true)}
+              onWarning={(msg) => showToast(msg, 'warn', 6000)}
+            />
             {/* Candidate name */}
             <div className="hidden sm:flex items-center gap-2 text-sm font-semibold text-slate-700">
               <div className="w-7 h-7 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-700 text-xs font-extrabold">
@@ -693,6 +772,29 @@ export default function ExamPage() {
                 {submitting ? 'Submitting…' : 'Yes, Submit'}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+      {/* ── Toast notification ──────────────────────────────────────────── */}
+      {toastMessage && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 pointer-events-none">
+          <div className={clsx(
+            'px-5 py-3 rounded-2xl text-sm font-semibold shadow-xl transition-all',
+            toastMessage.level === 'warn'  ? 'bg-amber-500 text-white' :
+            toastMessage.level === 'error' ? 'bg-red-600 text-white' :
+                                             'bg-slate-800 text-white'
+          )}>
+            {toastMessage.text}
+          </div>
+        </div>
+      )}
+
+      {/* ── Syncing indicator (unsynced answers) ────────────────────────── */}
+      {syncingCount > 0 && (
+        <div className="fixed bottom-6 right-6 z-40">
+          <div className="flex items-center gap-2 bg-white border border-amber-300 text-amber-700 text-xs font-semibold px-3 py-2 rounded-full shadow-md">
+            <span className="w-2 h-2 bg-amber-400 rounded-full animate-pulse" />
+            Syncing {syncingCount} answer{syncingCount > 1 ? 's' : ''}…
           </div>
         </div>
       )}

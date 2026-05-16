@@ -10,22 +10,26 @@ const BLOCKED_CTRL_KEYS = ['c', 'x', 'v', 'a', 'u', 's', 'p', 'f']
 const IS_DEV = process.env.NODE_ENV === 'development'
 
 const TYPE_COOLDOWNS = {
-  right_click:        3000,
-  tab_switch:         5000,
-  tab_hidden:         5000,
-  extended_tab_switch: 10000,
-  fullscreen_exit:    5000,
-  copy_paste_attempt: 3000,
-  copy_attempt:       3000,
-  cut_attempt:        3000,
-  paste_attempt:      3000,
-  drag_attempt:       3000,
-  devtools_attempt:   5000,
-  screenshot_attempt: 5000,
-  multiple_monitors:  30000,
+  right_click:          3000,
+  tab_switch:           5000,
+  tab_hidden:           5000,
+  extended_tab_switch:  10000,
+  fullscreen_exit:      5000,
+  copy_paste_attempt:   3000,
+  copy_attempt:         3000,
+  cut_attempt:          3000,
+  paste_attempt:        3000,
+  drag_attempt:         3000,
+  devtools_attempt:     5000,
+  screenshot_attempt:   5000,
+  print_attempt:        10000,
+  multiple_monitors:    30000,
   multiple_monitors_dev: 30000,
 }
 const DEFAULT_COOLDOWN = 2000
+
+// After this many tab switches the severity escalates from 2 → 4
+const TAB_SWITCH_ESCALATION_THRESHOLD = 3
 
 export default function AntiCheatWrapper({ children, examId }) {
   const [fullscreenActive, setFullscreenActive] = useState(false)
@@ -35,23 +39,24 @@ export default function AntiCheatWrapper({ children, examId }) {
   const examStatus       = useExamStore(s => s.examStatus)
   const candidateName    = useExamStore(s => s.candidateName)
   const candidateId      = useExamStore(s => s.candidateId)
-  const blurTimeRef      = useRef(null)
-  const cooldownRef      = useRef({})
-  const blurHandledRef   = useRef(false)
-  const fsRequestedRef   = useRef(false)
+  const blurTimeRef        = useRef(null)
+  const cooldownRef        = useRef({})
+  const blurHandledRef     = useRef(false)
+  const fsRequestedRef     = useRef(false)
+  const tabSwitchCountRef  = useRef(0)    // total tab/window switches this session
 
-  const sendViolation = useCallback((type, severity = 2) => {
+  const sendViolation = useCallback((type, severity = 2, extraData = {}) => {
     const now = Date.now()
     const cooldown = TYPE_COOLDOWNS[type] || DEFAULT_COOLDOWN
     const last = cooldownRef.current[type] || 0
     if (now - last < cooldown) return
     cooldownRef.current[type] = now
 
-    const v = { type, severity, timestamp: new Date().toISOString(), examId }
+    const v = { type, severity, timestamp: new Date().toISOString(), examId, ...extraData }
     addViolation(v)
     wsClient.sendViolation(v)
 
-    reportViolation(examId, { type, severity })
+    reportViolation(examId, { type, severity, extra_data: extraData })
       .then(res => {
         if (res?.data?.integrity_score !== undefined) {
           setIntegrityScore(res.data.integrity_score)
@@ -91,7 +96,8 @@ export default function AntiCheatWrapper({ children, examId }) {
   }, [examStatus, sendViolation])
 
   // Tab / window blur detection — deduplicated so blur+visibilitychange
-  // on the same navigation only sends ONE violation
+  // on the same navigation only sends ONE violation.
+  // Severity escalates after TAB_SWITCH_ESCALATION_THRESHOLD switches.
   useEffect(() => {
     const handleBlur = () => {
       blurTimeRef.current = Date.now()
@@ -102,16 +108,25 @@ export default function AntiCheatWrapper({ children, examId }) {
         const duration = Date.now() - blurTimeRef.current
         blurTimeRef.current = null
         if (!blurHandledRef.current) {
-          sendViolation('tab_switch', 2)
+          tabSwitchCountRef.current += 1
+          const count = tabSwitchCountRef.current
+          // Severity 2 for first few switches, 4 after threshold (repeated offender)
+          const sev = count >= TAB_SWITCH_ESCALATION_THRESHOLD ? 4 : 2
+          sendViolation('tab_switch', sev, { switch_count: count, duration_ms: duration })
           blurHandledRef.current = true
         }
-        if (duration > 10000) sendViolation('extended_tab_switch', 4)
+        if (duration > 10000) {
+          sendViolation('extended_tab_switch', 4, { duration_ms: duration })
+        }
       }
     }
     const handleVisibility = () => {
       if (document.hidden && !blurHandledRef.current) {
         blurTimeRef.current = blurTimeRef.current || Date.now()
-        sendViolation('tab_hidden', 2)
+        tabSwitchCountRef.current += 1
+        const count = tabSwitchCountRef.current
+        const sev = count >= TAB_SWITCH_ESCALATION_THRESHOLD ? 4 : 2
+        sendViolation('tab_hidden', sev, { switch_count: count })
         blurHandledRef.current = true
       }
     }
@@ -180,6 +195,14 @@ export default function AntiCheatWrapper({ children, examId }) {
     }
     document.addEventListener('keyup', handleKeyUp)
     return () => document.removeEventListener('keyup', handleKeyUp)
+  }, [sendViolation])
+
+  // Print prevention — Ctrl+P is blocked by keydown above (in BLOCKED_CTRL_KEYS),
+  // but window.print() can be triggered programmatically or via browser menu.
+  useEffect(() => {
+    const handleBeforePrint = () => sendViolation('print_attempt', 3)
+    window.addEventListener('beforeprint', handleBeforePrint)
+    return () => window.removeEventListener('beforeprint', handleBeforePrint)
   }, [sendViolation])
 
   // Block clipboard DOM events (copy / cut / paste / drag)

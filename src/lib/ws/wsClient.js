@@ -63,6 +63,10 @@ class ExamWebSocket {
     this.ws.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data)
+        // Respond to server PING immediately so the 45s PONG deadline is met
+        if (msg.type === 'PING') {
+          this.send({ type: 'PONG' })
+        }
         this.emit(msg.type, msg)
         this.emit('message', msg) // catch-all
       } catch (_) {}

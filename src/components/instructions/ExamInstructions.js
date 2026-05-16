@@ -29,7 +29,7 @@ import {
   ClipboardList, BookOpen, ChevronRight, Info, Clock, Hash,
   CheckSquare, Zap, Volume2, LayoutGrid, Send, Phone,
   Sun, Users, BatteryCharging, Headphones, BookMarked,
-  RefreshCw, Lock, Radio, Laptop,
+  RefreshCw, Lock, Radio, Laptop, Ruler,
 } from 'lucide-react'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -324,6 +324,7 @@ export default function ExamInstructions({
                 { icon: Users, ok: false, title: 'No Other Person', desc: 'You must be alone in the room. No family member, friend, or pet should be visible or audible. AI detects multiple faces and voices.' },
                 { icon: BatteryCharging, ok: true, title: 'Power', desc: 'Fully charge your laptop or keep it plugged in. A power cut will not lose your answers (they are saved), but reconnecting adds stress on exam day.' },
                 { icon: Headphones, ok: false, title: 'No Earphones', desc: 'Headphones and earphones are strictly prohibited. Wearing them during the exam will be visible in webcam snapshots and will be flagged.' },
+                { icon: Ruler, ok: true, title: 'Camera Distance', desc: 'Sit at arm\'s length from your screen (approximately 50–70 cm). Your full face, shoulders, and upper body must be visible in the webcam frame. Sitting too close hides what is around you — if you move closer, the camera cannot see if you are holding a phone or using notes.' },
               ].map(({ icon: Icon, ok, title, desc }) => (
                 <div key={title} className={clsx(
                   'rounded-xl p-4 border text-sm',
@@ -506,6 +507,8 @@ export default function ExamInstructions({
                   'Your face is checked at login and matched against your registered photo ID. You <strong>must pass</strong> this check to enter the exam.',
                   'Your face is <strong>re-checked automatically every 60 seconds</strong> during the exam using the same AI.',
                   'You must remain visible in the webcam frame at all times.',
+                  '<strong>Sit at arm\'s length from your screen (50–70 cm).</strong> Your full face and upper body must be clearly visible. If you sit too close, your hands and surroundings are hidden — the AI will flag the reduced view as a proctoring gap.',
+                  'If another person is detected in the frame during verification or during the exam, verification will fail and a violation will be recorded automatically.',
                   'Sit facing a light source — <strong>do not sit with light behind you</strong> (your face will be too dark to verify).',
                   'Do not cover your face with your hands, a mask, a scarf, or anything else.',
                   'If a face check fails: a violation is recorded. It does <strong>not</strong> immediately disqualify you — faculty reviews it.',
@@ -601,7 +604,10 @@ export default function ExamInstructions({
               <h3 className="text-sm font-bold text-exam-text mb-3">Violation Impact (higher bar = more serious)</h3>
               <div className="border border-exam-border rounded-xl px-4 py-2">
                 <ViolationRow label="Face mismatch / impersonation attempt" impact="Highest" color="red" />
+                <ViolationRow label="Mobile phone / device detected in snapshot" impact="High" color="red" />
                 <ViolationRow label="Multiple faces in frame" impact="High" color="red" />
+                <ViolationRow label="Earphones / headphones detected in snapshot" impact="High" color="red" />
+                <ViolationRow label="Book or textbook detected in snapshot" impact="Medium" color="amber" />
                 <ViolationRow label="Microphone permission denied" impact="High" color="red" />
                 <ViolationRow label="Voice assistant keyword detected (Hey Siri, OK Google...)" impact="High" color="red" />
                 <ViolationRow label="Sustained gaze deviation (looking away > 3 sec)" impact="Medium" color="amber" />
@@ -693,6 +699,7 @@ export default function ExamInstructions({
                 <Rule allowed={false}>Headphones, earphones, or any audio device</Rule>
                 <Rule allowed={false}>Written notes, handwritten formulas, or books near the desk</Rule>
                 <Rule allowed={false}>Physical or digital calculator</Rule>
+                <Rule allowed={false}>Sitting too close to the screen — your full upper body must be visible</Rule>
               </ul>
               <ul className="space-y-0.5">
                 <Rule allowed={false}>Screen sharing or remote desktop (AnyDesk, TeamViewer, etc.)</Rule>
@@ -814,6 +821,7 @@ export default function ExamInstructions({
                   <ChecklistItem>I am using <strong>Google Chrome or Microsoft Edge</strong> — not Firefox, Safari, or any other browser</ChecklistItem>
                   <ChecklistItem>I am on a <strong>laptop or desktop computer</strong> — not a mobile phone or tablet</ChecklistItem>
                   <ChecklistItem>My <strong>webcam is ON</strong> and I can see my face clearly in the preview — my face is well-lit and fully visible</ChecklistItem>
+                  <ChecklistItem>I am sitting at <strong>arm's length from my screen (50–70 cm)</strong> — my full face, shoulders, and upper body are visible in the webcam preview</ChecklistItem>
                   <ChecklistItem>My <strong>microphone is working</strong> and I have granted microphone permission to the browser</ChecklistItem>
                   <ChecklistItem>I am <strong>alone in a quiet, well-lit room</strong> — no other person is visible or can be heard</ChecklistItem>
                   <ChecklistItem>My <strong>mobile phone is away from the desk</strong> — not on the table, not in my hand, not visible in the camera</ChecklistItem>
