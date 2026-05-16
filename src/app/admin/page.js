@@ -223,8 +223,9 @@ export default function AdminDashboard() {
 
   // ── Active exam state (replaces hardcoded EXAM_ID = 1)
   const [activeExam,   setActiveExam]   = useState(null)   // full exam object
-  const [allExams,     setAllExams]     = useState([])     // all exams for picker
-  const [examLoading,  setExamLoading]  = useState(true)
+  const [allExams,       setAllExams]       = useState([])     // all exams for picker
+  const [examLoading,    setExamLoading]    = useState(true)
+  const [examsLoadError, setExamsLoadError] = useState(false)
 
   // Derived: always use the active exam's ID (fallback to 1 for safety)
   const EXAM_ID = activeExam?.id ?? 1
@@ -308,7 +309,10 @@ export default function AdminDashboard() {
           }
         }
       })
-      .catch(() => {})
+      .catch((err) => {
+        console.error('[Admin] listExams failed:', err)
+        setExamsLoadError(true)
+      })
       .finally(() => setExamLoading(false))
   }, [authReady])
 
@@ -1104,8 +1108,40 @@ export default function AdminDashboard() {
                 <span className="text-blue-700 text-sm">📋</span>
                 <span className="text-sm font-semibold text-blue-800">Register candidates into exam:</span>
               </div>
-              {allExams.length === 0 ? (
+              {examLoading ? (
                 <span className="text-xs text-blue-600 italic">Loading exams…</span>
+              ) : examsLoadError ? (
+                <span className="flex items-center gap-2">
+                  <span className="text-xs text-red-600">Failed to load exams.</span>
+                  <button
+                    onClick={() => {
+                      setExamsLoadError(false)
+                      setExamLoading(true)
+                      listExams()
+                        .then(({ data }) => {
+                          const exams = data || []
+                          setAllExams(exams)
+                          const active = exams.find(e => e.status === 'active')
+                            || exams.find(e => e.status === 'paused')
+                            || exams[0]
+                          if (active) {
+                            setActiveExam(active)
+                            setRegistrationExamId(active.id)
+                          }
+                        })
+                        .catch((err) => {
+                          console.error('[Admin] listExams retry failed:', err)
+                          setExamsLoadError(true)
+                        })
+                        .finally(() => setExamLoading(false))
+                    }}
+                    className="text-xs text-blue-700 underline hover:text-blue-900"
+                  >
+                    Retry
+                  </button>
+                </span>
+              ) : allExams.length === 0 ? (
+                <span className="text-xs text-blue-600 italic">No exams found — create an exam first.</span>
               ) : (
                 <select
                   value={registrationExamId ?? ''}
