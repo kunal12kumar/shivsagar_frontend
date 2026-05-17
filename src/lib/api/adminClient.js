@@ -58,6 +58,8 @@ export const bulkImportCandidates = (file, examId = null) => {
   })
 }
 export const deleteCandidate = (candidateId) => adminClient.delete(`/admin/candidates/${candidateId}`)
+export const bulkDeleteCandidates = (candidateIds) =>
+  adminClient.delete('/admin/candidates/bulk-delete', { data: { candidate_ids: candidateIds } })
 export const getViolations   = (examId = 1, limit = 100) =>
   adminClient.get(`/admin/violations?exam_id=${examId}&limit=${limit}`)
 export const getCandidateViolations = (candidateId, examId = 1, limit = 100) =>
@@ -81,6 +83,8 @@ export const endExam         = (examId) => adminClient.post(`/admin/exams/${exam
 // Returns an Excel blob — caller must trigger a browser download.
 export const generateCredentials = () =>
   adminClient.post('/admin/candidates/generate-credentials', {}, { responseType: 'blob', timeout: 60000 })
+export const exportCredentials = () =>
+  adminClient.get('/admin/candidates/export-credentials', { responseType: 'blob', timeout: 60000 })
 
 // ── Results ───────────────────────────────────────────────────────────────────
 export const getResults      = (examId) => adminClient.get(`/admin/exams/${examId}/results`)

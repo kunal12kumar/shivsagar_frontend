@@ -17,10 +17,10 @@ import toast from 'react-hot-toast'
 import { fmtIST, fmtISTTime, fmtRelative } from '@/lib/utils/time'
 import {
   getCandidates, getViolations, controlExam,
-  startExam, endExam, getResults, computeResults, exportResults, generateCredentials, indexFace,
+  startExam, endExam, getResults, computeResults, exportResults, generateCredentials, exportCredentials, indexFace,
   exportAllAnswerSheets, exportCandidateAnswerSheet,
   getCandidateViolations, getLiveScores, resetCandidateScore,
-  addCandidate, bulkImportCandidates, deleteCandidate,
+  addCandidate, bulkImportCandidates, deleteCandidate, bulkDeleteCandidates,
   listExams, getAdminRole, getCandidatePhotoUrl,
 } from '@/lib/api/adminClient'
 import { clsx } from 'clsx'
@@ -252,6 +252,7 @@ export default function AdminDashboard() {
   const [enrollStatus, setEnrollStatus] = useState({})
   const [enrollPreview, setEnrollPreview] = useState({})   // { [candidateId]: objectURL }
   const [photoModal, setPhotoModal] = useState(null)       // { url, name, roll_number } | null
+  const [checkedCandidates, setCheckedCandidates] = useState(new Set())
   const fileInputRefs               = useRef({})           // { [candidateId]: <input> }
   const wsRef                       = useRef(null)
   const pollRef                     = useRef(null)
@@ -477,6 +478,17 @@ export default function AdminDashboard() {
       toast.success('✓ Credentials generated — Excel downloaded', { id: toastId })
     } catch (err) {
       toast.error(err.response?.data?.detail || 'Failed to generate credentials', { id: toastId })
+    }
+  }
+
+  const handleExportCredentials = async () => {
+    const toastId = toast.loading('Preparing credentials sheet…')
+    try {
+      const res = await exportCredentials()
+      downloadBlob(res, 'DAT2026_Credentials.xlsx')
+      toast.success('✓ Credentials downloaded', { id: toastId })
+    } catch (err) {
+      toast.error(err.response?.data?.detail || 'Failed to download credentials', { id: toastId })
     }
   }
 
@@ -712,6 +724,25 @@ export default function AdminDashboard() {
       toast.success(`${candidate.name} deleted`, { id: toastId })
     } catch (err) {
       toast.error(err.response?.data?.detail || 'Delete failed', { id: toastId })
+    }
+  }
+
+  const handleBulkDelete = async () => {
+    const ids = [...checkedCandidates]
+    if (ids.length === 0) return
+    const names = candidates.filter(c => ids.includes(c.id)).map(c => c.name).join(', ')
+    if (!await confirmToast(
+      `Delete ${ids.length} candidate${ids.length > 1 ? 's' : ''}: ${names}? This removes all their answers, violations and results. Irreversible.`,
+      { danger: true }
+    )) return
+    const toastId = toast.loading(`Deleting ${ids.length} candidates…`)
+    try {
+      await bulkDeleteCandidates(ids)
+      setCandidates(prev => prev.filter(c => !ids.includes(c.id)))
+      setCheckedCandidates(new Set())
+      toast.success(`${ids.length} candidate${ids.length > 1 ? 's' : ''} deleted`, { id: toastId })
+    } catch (err) {
+      toast.error(err.response?.data?.detail || 'Bulk delete failed', { id: toastId })
     }
   }
 
@@ -1203,6 +1234,14 @@ export default function AdminDashboard() {
                 >
                   🔑 Generate &amp; Download Credentials
                 </button>
+                <button
+                  onClick={handleExportCredentials}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-xl text-sm font-semibold
+                             hover:bg-blue-700 transition-colors whitespace-nowrap"
+                  title="Re-download the credentials sheet with stored passwords anytime"
+                >
+                  📥 Download Credentials
+                </button>
               </div>
             </div>
 
@@ -1569,14 +1608,25 @@ APP260001,Rahul Kumar Singh,Rajesh Kumar Singh,rahul@gmail.com,9876543210,2008-0
 
           {/* ── Student list ───────────────────────────────────────────── */}
           <div className="bg-white rounded-2xl border border-exam-border overflow-hidden">
-            <div className="px-5 py-4 border-b border-exam-border flex items-center justify-between">
+            <div className="px-5 py-4 border-b border-exam-border flex items-center justify-between gap-3">
               <h3 className="font-semibold text-exam-text">
                 All Candidates
                 <span className="ml-2 text-xs font-normal text-exam-muted">({candidates.length} total)</span>
               </h3>
-              <span className="text-xs text-exam-muted">
-                {candidates.filter(c => c.photo_indexed).length} / {candidates.length} photos enrolled
-              </span>
+              <div className="flex items-center gap-3">
+                {checkedCandidates.size > 0 && (
+                  <button
+                    onClick={handleBulkDelete}
+                    className="px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs font-semibold
+                               hover:bg-red-700 transition-colors flex items-center gap-1.5"
+                  >
+                    🗑 Delete Selected ({checkedCandidates.size})
+                  </button>
+                )}
+                <span className="text-xs text-exam-muted">
+                  {candidates.filter(c => c.photo_indexed).length} / {candidates.length} photos enrolled
+                </span>
+              </div>
             </div>
 
             {candidates.length === 0 ? (
@@ -1589,6 +1639,15 @@ APP260001,Rahul Kumar Singh,Rajesh Kumar Singh,rahul@gmail.com,9876543210,2008-0
                 <table className="w-full text-sm">
                   <thead className="bg-gray-50 border-b border-exam-border">
                     <tr>
+                      <th className="px-4 py-3 text-left">
+                        <input
+                          type="checkbox"
+                          className="w-4 h-4 rounded cursor-pointer"
+                          checked={candidates.length > 0 && checkedCandidates.size === candidates.length}
+                          ref={el => { if (el) el.indeterminate = checkedCandidates.size > 0 && checkedCandidates.size < candidates.length }}
+                          onChange={e => setCheckedCandidates(e.target.checked ? new Set(candidates.map(c => c.id)) : new Set())}
+                        />
+                      </th>
                       {['#', 'Roll No (auto)', 'App No', 'Name', 'Email', 'Photo', 'Exam Started', 'Action'].map(h => (
                         <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-exam-muted uppercase tracking-wide">
                           {h}
@@ -1598,7 +1657,19 @@ APP260001,Rahul Kumar Singh,Rajesh Kumar Singh,rahul@gmail.com,9876543210,2008-0
                   </thead>
                   <tbody className="divide-y divide-exam-border">
                     {candidates.map((c, i) => (
-                      <tr key={c.id} className="hover:bg-gray-50 transition-colors">
+                      <tr key={c.id} className={`hover:bg-gray-50 transition-colors ${checkedCandidates.has(c.id) ? 'bg-red-50' : ''}`}>
+                        <td className="px-4 py-3">
+                          <input
+                            type="checkbox"
+                            className="w-4 h-4 rounded cursor-pointer"
+                            checked={checkedCandidates.has(c.id)}
+                            onChange={e => setCheckedCandidates(prev => {
+                              const next = new Set(prev)
+                              e.target.checked ? next.add(c.id) : next.delete(c.id)
+                              return next
+                            })}
+                          />
+                        </td>
                         <td className="px-4 py-3 text-xs text-exam-muted">{i + 1}</td>
                         <td className="px-4 py-3 font-mono text-xs text-exam-blue font-bold">{c.roll_number}</td>
                         <td className="px-4 py-3 font-mono text-xs text-exam-muted">{c.application_number || '—'}</td>
