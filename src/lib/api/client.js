@@ -41,6 +41,8 @@ apiClient.interceptors.response.use(
 )
 
 // --- Auth ---
+export const candidateLogin = (data) => apiClient.post('/auth/login', data)
+// OTP endpoints kept for backward compat but no longer used by the login page
 export const sendOTP = (data) => apiClient.post('/auth/otp/send', data)
 export const verifyOTP = (data) => apiClient.post('/auth/otp/verify', data)
 

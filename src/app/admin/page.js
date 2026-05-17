@@ -17,7 +17,8 @@ import toast from 'react-hot-toast'
 import { fmtIST, fmtISTTime, fmtRelative } from '@/lib/utils/time'
 import {
   getCandidates, getViolations, controlExam,
-  startExam, endExam, getResults, computeResults, indexFace,
+  startExam, endExam, getResults, computeResults, exportResults, generateCredentials, indexFace,
+  exportAllAnswerSheets, exportCandidateAnswerSheet,
   getCandidateViolations, getLiveScores, resetCandidateScore,
   addCandidate, bulkImportCandidates, deleteCandidate,
   listExams, getAdminRole,
@@ -455,6 +456,66 @@ export default function AdminDashboard() {
   }
 
   // Manual re-compute — admin override for corrections / edge cases
+  // ── Helper: trigger browser download from an axios blob response ──────────
+  const downloadBlob = (res, filename) => {
+    const url = window.URL.createObjectURL(new Blob([res.data]))
+    const a   = document.createElement('a')
+    a.href    = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    window.URL.revokeObjectURL(url)
+  }
+
+  const handleGenerateCredentials = async () => {
+    const toastId = toast.loading('Generating roll numbers & passwords…')
+    try {
+      const res = await generateCredentials()
+      downloadBlob(res, 'DAT2026_Credentials.xlsx')
+      toast.success('✓ Credentials generated — Excel downloaded', { id: toastId })
+    } catch (err) {
+      toast.error(err.response?.data?.detail || 'Failed to generate credentials', { id: toastId })
+    }
+  }
+
+  const handleExportResults = async () => {
+    if (!EXAM_ID) { toast.error('No active exam selected'); return }
+    const toastId = toast.loading('Preparing results export…')
+    try {
+      const res = await exportResults(EXAM_ID)
+      downloadBlob(res, `DAT2026_Results_Exam${EXAM_ID}.xlsx`)
+      toast.success('✓ Results downloaded', { id: toastId })
+    } catch (err) {
+      toast.error(err.response?.data?.detail || 'No results found — compute results first', { id: toastId })
+    }
+  }
+
+  const handleExportAllAnswerSheets = async () => {
+    if (!EXAM_ID) { toast.error('No active exam selected'); return }
+    const toastId = toast.loading('Building all answer sheets — this may take a moment…')
+    try {
+      const res = await exportAllAnswerSheets(EXAM_ID)
+      downloadBlob(res, `DAT2026_AllAnswerSheets_Exam${EXAM_ID}.xlsx`)
+      toast.success('✓ All answer sheets downloaded', { id: toastId })
+    } catch (err) {
+      toast.error(err.response?.data?.detail || 'No submitted answers found', { id: toastId })
+    }
+  }
+
+  const handleExportCandidateAnswerSheet = async (candidate) => {
+    const examId = candidate.exam_id || EXAM_ID
+    const toastId = toast.loading(`Preparing answer sheet for ${candidate.name}…`)
+    try {
+      const res = await exportCandidateAnswerSheet(candidate.id, examId)
+      const roll = candidate.roll_number || `C${candidate.id}`
+      downloadBlob(res, `AnswerSheet_${roll}.xlsx`)
+      toast.success(`✓ Answer sheet for ${candidate.name} downloaded`, { id: toastId })
+    } catch (err) {
+      toast.error(err.response?.data?.detail || 'No answers found for this candidate', { id: toastId })
+    }
+  }
+
   const handleComputeResults = async () => {
     const toastId = toast.loading('Re-computing results…')
     try {
@@ -871,6 +932,22 @@ export default function AdminDashboard() {
                 >
                   🔄 Refresh
                 </button>
+                <button
+                  onClick={handleExportResults}
+                  disabled={resultsLoading || results.length === 0}
+                  className="px-4 py-2 text-sm bg-green-600 text-white rounded-xl font-medium
+                             hover:bg-green-700 disabled:opacity-60 transition-colors"
+                >
+                  ⬇ Results Excel
+                </button>
+                <button
+                  onClick={handleExportAllAnswerSheets}
+                  disabled={resultsLoading}
+                  className="px-4 py-2 text-sm bg-indigo-600 text-white rounded-xl font-medium
+                             hover:bg-indigo-700 disabled:opacity-60 transition-colors"
+                >
+                  📋 All Answer Sheets
+                </button>
               </div>
             </div>
 
@@ -1026,7 +1103,7 @@ export default function AdminDashboard() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-exam-border text-left">
-                    {['Roll No', 'Name', 'Email', 'Integrity', 'Violations', 'Status', 'Action', ...(IS_DEV ? ['Dev'] : [])].map(h => (
+                    {['Roll No', 'Name', 'Email', 'Integrity', 'Violations', 'Status', 'Actions', ...(IS_DEV ? ['Dev'] : [])].map(h => (
                       <th key={h} className="pb-3 pr-4 text-xs font-semibold text-exam-muted uppercase tracking-wide">
                         {h}
                       </th>
@@ -1050,13 +1127,23 @@ export default function AdminDashboard() {
                         </span>
                       </td>
                       <td className="py-3 pr-4">
-                        <button
-                          onClick={() => handleBlockCandidate(c.id)}
-                          className="px-3 py-1 text-xs bg-red-50 text-red-700 border border-red-200
-                                     rounded-lg hover:bg-red-100 font-medium transition-colors"
-                        >
-                          Block
-                        </button>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            onClick={() => handleBlockCandidate(c.id)}
+                            className="px-3 py-1 text-xs bg-red-50 text-red-700 border border-red-200
+                                       rounded-lg hover:bg-red-100 font-medium transition-colors"
+                          >
+                            Block
+                          </button>
+                          <button
+                            onClick={() => handleExportCandidateAnswerSheet(c)}
+                            className="px-3 py-1 text-xs bg-indigo-50 text-indigo-700 border border-indigo-200
+                                       rounded-lg hover:bg-indigo-100 font-medium transition-colors"
+                            title={`Download answer sheet for ${c.name}`}
+                          >
+                            📋 Sheet
+                          </button>
+                        </div>
                       </td>
                       {IS_DEV && (
                         <td className="py-3 pr-4">
@@ -1093,9 +1180,19 @@ export default function AdminDashboard() {
                   After adding, go to <strong>Face Enrollment</strong> to upload their photos.
                 </p>
               </div>
-              <div className="text-right flex-shrink-0 ml-4">
-                <div className="text-3xl font-extrabold text-exam-blue">{candidates.length}</div>
-                <div className="text-xs text-exam-muted">registered</div>
+              <div className="flex items-center gap-3 flex-shrink-0 ml-4">
+                <div className="text-right">
+                  <div className="text-3xl font-extrabold text-exam-blue">{candidates.length}</div>
+                  <div className="text-xs text-exam-muted">registered</div>
+                </div>
+                <button
+                  onClick={handleGenerateCredentials}
+                  className="px-4 py-2 bg-green-600 text-white rounded-xl text-sm font-semibold
+                             hover:bg-green-700 transition-colors whitespace-nowrap"
+                  title="Generates roll numbers & passwords for all candidates, then downloads as Excel"
+                >
+                  🔑 Generate &amp; Download Credentials
+                </button>
               </div>
             </div>
 

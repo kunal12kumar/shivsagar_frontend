@@ -1,14 +1,7 @@
 'use client'
-/**
- * Login page — OTP-based authentication.
- * Step 1: Enter roll number + email → OTP sent via AWS SES
- * Step 2: Enter 6-digit OTP → JWT issued → redirect to /checklist
- *
- * No passwords. Candidates authenticate only with their registered email.
- */
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { sendOTP, verifyOTP } from '@/lib/api/client'
+import { candidateLogin } from '@/lib/api/client'
 import useExamStore from '@/lib/store/examStore'
 import Card from '@/components/ui/Card'
 import Button from '@/components/ui/Button'
@@ -17,40 +10,24 @@ export default function LoginPage() {
   const router = useRouter()
   const setAuth = useExamStore((s) => s.setAuth)
 
-  const [step, setStep] = useState(1) // 1 = enter details, 2 = enter OTP
-  const [form, setForm] = useState({ rollNumber: '', email: '' })
-  const [otp, setOtp] = useState('')
+  const [form, setForm] = useState({ rollNumber: '', password: '' })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
 
-  const handleSendOTP = async (e) => {
+  const handleLogin = async (e) => {
     e.preventDefault()
     setError('')
-    if (!form.rollNumber.trim() || !form.email.trim()) {
-      setError('Please enter your roll number and registered email.')
+    if (!form.rollNumber.trim() || !form.password.trim()) {
+      setError('Please enter your roll number and password.')
       return
     }
     setLoading(true)
     try {
-      await sendOTP({ roll_number: form.rollNumber.trim(), email: form.email.trim().toLowerCase() })
-      setStep(2)
-    } catch (err) {
-      setError(err.response?.data?.detail || 'Failed to send OTP. Please check your details.')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const handleVerifyOTP = async (e) => {
-    e.preventDefault()
-    setError('')
-    if (otp.length !== 6) {
-      setError('Please enter the 6-digit OTP sent to your email.')
-      return
-    }
-    setLoading(true)
-    try {
-      const res = await verifyOTP({ roll_number: form.rollNumber.trim(), otp })
+      const res = await candidateLogin({
+        roll_number: form.rollNumber.trim().toUpperCase(),
+        password: form.password,
+      })
       const { access_token, candidate } = res.data
       setAuth({
         jwt: access_token,
@@ -59,11 +36,9 @@ export default function LoginPage() {
         candidateEmail: candidate.email,
         examId: candidate.exam_id,
       })
-      // Always go to instructions — the exam page will check per-exam submission
-      // status via the backend (409 from startExam) and redirect if needed.
       router.push('/instructions')
     } catch (err) {
-      setError(err.response?.data?.detail || 'Invalid OTP. Please try again.')
+      setError(err.response?.data?.detail || 'Invalid roll number or password.')
     } finally {
       setLoading(false)
     }
@@ -84,89 +59,76 @@ export default function LoginPage() {
       </div>
 
       <Card className="w-full max-w-md">
-        {step === 1 ? (
-          <>
-            <h2 className="text-lg font-semibold text-exam-text mb-1">Candidate Login</h2>
-            <p className="text-sm text-exam-muted mb-6">
-              Enter your roll number and registered email. An OTP will be sent to your email.
-            </p>
-            <form onSubmit={handleSendOTP} className="flex flex-col gap-4">
-              <div>
-                <label className="block text-sm font-medium text-exam-text mb-1.5">Roll Number</label>
-                <input
-                  type="text"
-                  value={form.rollNumber}
-                  onChange={(e) => setForm({ ...form, rollNumber: e.target.value })}
-                  placeholder="e.g. 23CS3035"
-                  className="w-full px-4 py-3 rounded-lg border border-exam-border text-exam-text placeholder-exam-muted focus:outline-none focus:ring-2 focus:ring-exam-blue focus:border-exam-blue bg-white text-sm"
-                  autoComplete="off"
-                  autoFocus
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-exam-text mb-1.5">Registered Email</label>
-                <input
-                  type="email"
-                  value={form.email}
-                  onChange={(e) => setForm({ ...form, email: e.target.value })}
-                  placeholder="your@email.com"
-                  className="w-full px-4 py-3 rounded-lg border border-exam-border text-exam-text placeholder-exam-muted focus:outline-none focus:ring-2 focus:ring-exam-blue focus:border-exam-blue bg-white text-sm"
-                  autoComplete="email"
-                />
-              </div>
-              {error && (
-                <div className="bg-exam-red-light border border-red-200 text-exam-red text-sm px-4 py-3 rounded-lg">
-                  {error}
-                </div>
-              )}
-              <Button type="submit" loading={loading} className="w-full py-3 mt-1">
-                Send OTP to Email
-              </Button>
-            </form>
-          </>
-        ) : (
-          <>
-            <h2 className="text-lg font-semibold text-exam-text mb-1">Enter OTP</h2>
-            <p className="text-sm text-exam-muted mb-6">
-              A 6-digit OTP was sent to <strong>{form.email}</strong>. Enter it below.
-            </p>
-            <form onSubmit={handleVerifyOTP} className="flex flex-col gap-4">
-              <div>
-                <label className="block text-sm font-medium text-exam-text mb-1.5">OTP Code</label>
-                <input
-                  type="text"
-                  value={otp}
-                  onChange={(e) => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                  placeholder="6-digit OTP"
-                  className="w-full px-4 py-3 rounded-lg border border-exam-border text-exam-text text-center text-2xl font-mono tracking-widest focus:outline-none focus:ring-2 focus:ring-exam-blue bg-white"
-                  autoFocus
-                  maxLength={6}
-                />
-              </div>
-              {error && (
-                <div className="bg-exam-red-light border border-red-200 text-exam-red text-sm px-4 py-3 rounded-lg">
-                  {error}
-                </div>
-              )}
-              <Button type="submit" loading={loading} className="w-full py-3">
-                Verify & Login
-              </Button>
+        <h2 className="text-lg font-semibold text-exam-text mb-1">Candidate Login</h2>
+        <p className="text-sm text-exam-muted mb-6">
+          Enter your roll number and password from your admit card.
+        </p>
+
+        <form onSubmit={handleLogin} className="flex flex-col gap-4">
+          <div>
+            <label className="block text-sm font-medium text-exam-text mb-1.5">Roll Number</label>
+            <input
+              type="text"
+              value={form.rollNumber}
+              onChange={(e) => setForm({ ...form, rollNumber: e.target.value })}
+              placeholder="e.g. DAT260001"
+              className="w-full px-4 py-3 rounded-lg border border-exam-border text-exam-text placeholder-exam-muted
+                         focus:outline-none focus:ring-2 focus:ring-exam-blue focus:border-exam-blue bg-white text-sm uppercase tracking-wider"
+              autoComplete="username"
+              autoFocus
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-exam-text mb-1.5">Password</label>
+            <div className="relative">
+              <input
+                type={showPassword ? 'text' : 'password'}
+                value={form.password}
+                onChange={(e) => setForm({ ...form, password: e.target.value })}
+                placeholder="Password from admit card"
+                className="w-full px-4 py-3 pr-12 rounded-lg border border-exam-border text-exam-text placeholder-exam-muted
+                           focus:outline-none focus:ring-2 focus:ring-exam-blue focus:border-exam-blue bg-white text-sm"
+                autoComplete="current-password"
+              />
               <button
                 type="button"
-                onClick={() => { setStep(1); setOtp(''); setError('') }}
-                className="text-sm text-exam-blue hover:underline text-center"
+                onClick={() => setShowPassword(v => !v)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-exam-muted hover:text-exam-text"
+                tabIndex={-1}
               >
-                ← Back / Resend OTP
+                {showPassword ? (
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                      d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 4.411m0 0L21 21" />
+                  </svg>
+                ) : (
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                      d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                      d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                  </svg>
+                )}
               </button>
-            </form>
-          </>
-        )}
+            </div>
+          </div>
 
-        {/* Important notice */}
+          {error && (
+            <div className="bg-exam-red-light border border-red-200 text-exam-red text-sm px-4 py-3 rounded-lg">
+              {error}
+            </div>
+          )}
+
+          <Button type="submit" loading={loading} className="w-full py-3 mt-1">
+            Login
+          </Button>
+        </form>
+
         <div className="mt-6 pt-5 border-t border-exam-border">
           <p className="text-xs text-exam-muted text-center leading-relaxed">
-            Use <strong>Google Chrome</strong> or <strong>Microsoft Edge</strong> only.<br/>
-            Ensure your webcam and microphone are connected and working.<br/>
+            Use <strong>Google Chrome</strong> or <strong>Microsoft Edge</strong> only.<br />
+            Ensure your webcam and microphone are connected and working.<br />
             Keep your government-issued ID ready for verification.
           </p>
         </div>

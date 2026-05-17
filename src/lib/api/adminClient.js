@@ -76,9 +76,23 @@ export const controlExam     = (examId, action) =>
 export const startExam       = (examId) => adminClient.post(`/admin/exams/${examId}/start`)
 export const endExam         = (examId) => adminClient.post(`/admin/exams/${examId}/control`, { action: 'complete' })
 
+// ── Credentials ───────────────────────────────────────────────────────────────
+// Generates roll numbers + passwords for all candidates missing them.
+// Returns an Excel blob — caller must trigger a browser download.
+export const generateCredentials = () =>
+  adminClient.post('/admin/candidates/generate-credentials', {}, { responseType: 'blob', timeout: 60000 })
+
 // ── Results ───────────────────────────────────────────────────────────────────
 export const getResults      = (examId) => adminClient.get(`/admin/exams/${examId}/results`)
 export const computeResults  = (examId) => adminClient.post(`/admin/exams/${examId}/results/compute`)
+export const exportResults   = (examId) =>
+  adminClient.get(`/admin/exams/${examId}/results/export`, { responseType: 'blob', timeout: 60000 })
+
+// ── Answer sheets ─────────────────────────────────────────────────────────────
+export const exportAllAnswerSheets = (examId) =>
+  adminClient.get(`/admin/exams/${examId}/answers/export`, { responseType: 'blob', timeout: 120000 })
+export const exportCandidateAnswerSheet = (candidateId, examId) =>
+  adminClient.get(`/admin/candidates/${candidateId}/answers/export?exam_id=${examId}`, { responseType: 'blob', timeout: 30000 })
 
 // ── Face Enrollment (Operation A — IndexFaces) ────────────────────────────────
 export const indexFace = (candidateId, imageFile) => {
