@@ -21,7 +21,7 @@ import {
   exportAllAnswerSheets, exportCandidateAnswerSheet,
   getCandidateViolations, getLiveScores, resetCandidateScore,
   addCandidate, bulkImportCandidates, deleteCandidate,
-  listExams, getAdminRole,
+  listExams, getAdminRole, getCandidatePhotoUrl,
 } from '@/lib/api/adminClient'
 import { clsx } from 'clsx'
 
@@ -251,6 +251,7 @@ export default function AdminDashboard() {
   // Face enrollment state: { [candidateId]: 'idle'|'uploading'|'done'|'error', message? }
   const [enrollStatus, setEnrollStatus] = useState({})
   const [enrollPreview, setEnrollPreview] = useState({})   // { [candidateId]: objectURL }
+  const [photoModal, setPhotoModal] = useState(null)       // { url, name, roll_number } | null
   const fileInputRefs               = useRef({})           // { [candidateId]: <input> }
   const wsRef                       = useRef(null)
   const pollRef                     = useRef(null)
@@ -581,6 +582,15 @@ export default function AdminDashboard() {
       toast.success(`Score reset — ${violations_deleted} violation(s) deleted`, { id: toastId })
     } catch {
       toast.error('Reset failed', { id: toastId })
+    }
+  }
+
+  const handleViewPhoto = async (candidate) => {
+    try {
+      const res = await getCandidatePhotoUrl(candidate.id)
+      setPhotoModal({ url: res.data.url, name: res.data.name, roll_number: res.data.roll_number })
+    } catch (err) {
+      toast.error(err.response?.data?.detail || 'Could not load photo')
     }
   }
 
@@ -1754,7 +1764,7 @@ APP260001,Rahul Kumar Singh,Rajesh Kumar Singh,rahul@gmail.com,9876543210,2008-0
                         })()}
                       </td>
 
-                      {/* Upload action */}
+                      {/* Upload + View action */}
                       <td className="px-4 py-3">
                         <input
                           ref={(el) => { fileInputRefs.current[c.id] = el }}
@@ -1763,19 +1773,29 @@ APP260001,Rahul Kumar Singh,Rajesh Kumar Singh,rahul@gmail.com,9876543210,2008-0
                           className="hidden"
                           onChange={handleFileSelect(c.id)}
                         />
-                        <button
-                          disabled={isUploading}
-                          onClick={() => fileInputRefs.current[c.id]?.click()}
-                          className={clsx(
-                            'px-3 py-1.5 text-xs rounded-lg font-medium border transition-colors',
-                            isIndexed
-                              ? 'border-gray-200 text-exam-muted hover:border-exam-blue hover:text-exam-blue'
-                              : 'border-exam-blue text-exam-blue bg-blue-50 hover:bg-blue-100',
-                            isUploading && 'opacity-50 cursor-not-allowed'
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <button
+                            disabled={isUploading}
+                            onClick={() => fileInputRefs.current[c.id]?.click()}
+                            className={clsx(
+                              'px-3 py-1.5 text-xs rounded-lg font-medium border transition-colors',
+                              isIndexed
+                                ? 'border-gray-200 text-exam-muted hover:border-exam-blue hover:text-exam-blue'
+                                : 'border-exam-blue text-exam-blue bg-blue-50 hover:bg-blue-100',
+                              isUploading && 'opacity-50 cursor-not-allowed'
+                            )}
+                          >
+                            {isUploading ? 'Indexing…' : isIndexed ? '↑ Re-upload' : '↑ Upload Photo'}
+                          </button>
+                          {isIndexed && (
+                            <button
+                              onClick={() => handleViewPhoto(c)}
+                              className="px-3 py-1.5 text-xs rounded-lg font-medium border border-purple-200 text-purple-600 bg-purple-50 hover:bg-purple-100 transition-colors"
+                            >
+                              👁 View
+                            </button>
                           )}
-                        >
-                          {isUploading ? 'Indexing…' : isIndexed ? '↑ Re-upload' : '↑ Upload Photo'}
-                        </button>
+                        </div>
                         {es?.state === 'error' && (
                           <div className="text-xs text-red-600 mt-1 max-w-[160px]">{es.message}</div>
                         )}
@@ -2071,6 +2091,56 @@ APP260001,Rahul Kumar Singh,Rajesh Kumar Singh,rahul@gmail.com,9876543210,2008-0
                            hover:bg-gray-50 transition-colors min-w-[80px]">
                 Close
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Photo viewer modal ───────────────────────────────────────────── */}
+      {photoModal && (
+        <div
+          className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
+          onClick={() => setPhotoModal(null)}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-2xl max-w-sm w-full overflow-hidden"
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between px-5 py-4 border-b border-exam-border">
+              <div>
+                <p className="font-semibold text-exam-text">{photoModal.name}</p>
+                <p className="text-xs text-exam-muted font-mono mt-0.5">{photoModal.roll_number}</p>
+              </div>
+              <button
+                onClick={() => setPhotoModal(null)}
+                className="w-8 h-8 rounded-full bg-gray-100 hover:bg-gray-200 flex items-center justify-center text-exam-muted transition-colors"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Photo */}
+            <div className="bg-gray-50 flex items-center justify-center p-4">
+              <img
+                src={photoModal.url}
+                alt={photoModal.name}
+                className="max-w-full max-h-80 rounded-xl object-contain shadow"
+                onError={e => { e.target.src = ''; e.target.alt = 'Photo unavailable' }}
+              />
+            </div>
+
+            {/* Footer */}
+            <div className="px-5 py-3 border-t border-exam-border flex items-center justify-between">
+              <span className="text-xs text-exam-muted">Enrolled face photo · URL valid 1 hour</span>
+              <a
+                href={photoModal.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs text-exam-blue hover:underline font-medium"
+              >
+                Open full size ↗
+              </a>
             </div>
           </div>
         </div>

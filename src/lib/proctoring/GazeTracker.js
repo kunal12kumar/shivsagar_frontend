@@ -49,8 +49,10 @@ export class GazeTracker {
     // < 0.03 means the iris is very close to or below the nose → looking down.
     this.GAZE_Y_DOWN_THRESHOLD   = 0.03
 
-    this.lastViolationTime = 0
-    this.lastFrameTime     = 0
+    this.lastViolationTime    = 0
+    this.lastFrameTime        = 0
+    this.lastMultiFaceTime    = 0
+    this.MULTI_FACE_COOLDOWN_MS = 15000  // 15s between multi-face alerts
   }
 
   // ── Severity escalation ───────────────────────────────────────────────────
@@ -170,6 +172,20 @@ export class GazeTracker {
         this._fireViolation(duration, 'no_face')
       }
       return
+    }
+
+    // ── Multiple faces detected ──────────────────────────────────────────────
+    if (results.multiFaceLandmarks.length > 1) {
+      const now = Date.now()
+      if (now - this.lastMultiFaceTime > this.MULTI_FACE_COOLDOWN_MS) {
+        this.lastMultiFaceTime = now
+        this.onViolation?.({
+          type:      'multiple_faces',
+          severity:  7,
+          count:     results.multiFaceLandmarks.length,
+          timestamp: new Date().toISOString(),
+        })
+      }
     }
 
     // ── Analyse primary face only ────────────────────────────────────────────

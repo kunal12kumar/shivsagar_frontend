@@ -23,7 +23,9 @@ const WARNING_MESSAGES = {
   camera_unavailable:    'Camera is not available. Enable your webcam.',
   mic_permission_denied: 'Microphone access denied. Enable it for proctoring.',
   face_detection_failed: 'Face not detected. Stay visible to the camera.',
-  multiple_faces:        'Multiple faces detected in the frame.',
+  multiple_faces:        'Multiple faces detected in the frame! Only you should be visible.',
+  phone_detected:        'Mobile phone detected! Remove it immediately.',
+  book_detected:         'Book or study material detected! This is not allowed.',
 }
 
 const SEVERITY_STYLES = {

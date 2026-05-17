@@ -95,6 +95,8 @@ export const exportCandidateAnswerSheet = (candidateId, examId) =>
   adminClient.get(`/admin/candidates/${candidateId}/answers/export?exam_id=${examId}`, { responseType: 'blob', timeout: 30000 })
 
 // ── Face Enrollment (Operation A — IndexFaces) ────────────────────────────────
+export const getCandidatePhotoUrl = (candidateId) =>
+  adminClient.get(`/admin/candidates/${candidateId}/photo-url`)
 export const indexFace = (candidateId, imageFile) => {
   const form = new FormData()
   form.append('image', imageFile)

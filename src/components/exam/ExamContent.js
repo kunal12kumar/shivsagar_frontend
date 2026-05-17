@@ -11,6 +11,7 @@ import ExamTimer from '@/components/exam/ExamTimer'
 import { VoiceMonitor } from '@/lib/proctoring/VoiceMonitor'
 import { SnapshotWorker } from '@/lib/proctoring/SnapshotWorker'
 import { GazeTracker } from '@/lib/proctoring/GazeTracker'
+import { ObjectDetector } from '@/lib/proctoring/ObjectDetector'
 import { getActiveExam, getExamInfo, startExam, submitExam, getAllQuestions, reportViolation } from '@/lib/api/client'
 import { clsx } from 'clsx'
 
@@ -92,6 +93,7 @@ export default function ExamContent() {
   const voiceMonitorRef = useRef(null)
   const snapshotWorkerRef = useRef(null)
   const gazeTrackerRef = useRef(null)
+  const objectDetectorRef = useRef(null)
   const proctoringStarted = useRef(false)  // guard against Strict Mode double-invoke
   const [showSubmitDialog, setShowSubmitDialog] = useState(false)
   const [submitting, setSubmitting] = useState(false)
@@ -378,10 +380,15 @@ export default function ExamContent() {
         snapshotWorkerRef.current = sw
         sw.start(video, examId, candidateId)
 
-        // Gaze tracker — MediaPipe FaceMesh, detects look-away > 3s
+        // Gaze tracker — MediaPipe FaceMesh, detects look-away > 2s + multiple faces
         const gt = new GazeTracker()
         gazeTrackerRef.current = gt
         gt.start(video, sendProctoringViolation)
+
+        // Object detector — COCO-SSD, detects phone and book
+        const od = new ObjectDetector()
+        objectDetectorRef.current = od
+        od.start(video, sendProctoringViolation)
       })
       .catch((err) => {
         console.error('[Proctoring] Webcam access failed:', err)
@@ -393,6 +400,7 @@ export default function ExamContent() {
       voiceMonitorRef.current?.stop()
       snapshotWorkerRef.current?.stop()
       gazeTrackerRef.current?.stop()
+      objectDetectorRef.current?.stop()
     }
   }, [examLoaded, examId, candidateId, addViolation, setIntegrityScore])
 
