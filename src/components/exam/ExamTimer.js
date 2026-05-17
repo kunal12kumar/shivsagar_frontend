@@ -15,10 +15,12 @@ import { clsx } from 'clsx'
 // Populated once on mount by calling GET /health and comparing Date headers.
 let _serverTimeOffsetMs = 0
 
+const _API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+
 async function _syncServerTime() {
   try {
     const before = Date.now()
-    const res = await fetch('/health', { cache: 'no-store' })
+    const res = await fetch(`${_API_BASE}/health`, { cache: 'no-store' })
     const after = Date.now()
     const serverDate = res.headers.get('date')
     if (serverDate) {

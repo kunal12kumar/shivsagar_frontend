@@ -103,6 +103,15 @@ export default function ExamContent() {
   const [toastMessage, setToastMessage] = useState(null) // { text, level: 'info'|'warn'|'error' }
   const [syncingCount, setSyncingCount] = useState(0) // unsynced answers count
 
+  const {
+    jwt, examId, candidateId, candidateName,
+    questions, currentQuestion, answers, examStatus, submittedExamId,
+    setExamMeta, setQuestions, setCurrentQuestion,
+    setAnswer, confirmAnswer, addViolation,
+    setConnected, setExamStatus, setIntegrityScore,
+    syncFromServer, _hasHydrated
+  } = useExamStore()
+
   const showToast = useCallback((text, level = 'info', durationMs = 4000) => {
     setToastMessage({ text, level })
     setTimeout(() => setToastMessage(null), durationMs)
@@ -162,15 +171,6 @@ export default function ExamContent() {
   // 15-minute pre-exam countdown state
   const [countdownSecs, setCountdownSecs] = useState(null)  // null = not yet determined
   const [countdownDone, setCountdownDone] = useState(false)
-
-  const {
-    jwt, examId, candidateId, candidateName,
-    questions, currentQuestion, answers, examStatus, submittedExamId,
-    setExamMeta, setQuestions, setCurrentQuestion,
-    setAnswer, confirmAnswer, addViolation,
-    setConnected, setExamStatus, setIntegrityScore,
-    syncFromServer, _hasHydrated
-  } = useExamStore()
 
   // Guard: wait for localStorage hydration before redirecting to avoid false logout
   useEffect(() => {
