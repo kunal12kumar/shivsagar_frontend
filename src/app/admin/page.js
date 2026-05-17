@@ -742,7 +742,8 @@ export default function AdminDashboard() {
       setCheckedCandidates(new Set())
       toast.success(`${ids.length} candidate${ids.length > 1 ? 's' : ''} deleted`, { id: toastId })
     } catch (err) {
-      toast.error(err.response?.data?.detail || 'Bulk delete failed', { id: toastId })
+      const detail = err.response?.data?.detail
+      toast.error(typeof detail === 'string' ? detail : 'Bulk delete failed', { id: toastId })
     }
   }
 
